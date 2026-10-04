@@ -27,7 +27,7 @@ pub struct EngineConfig {
 }
 
 /// Process-scoped llama.cpp scorer. The model is leaked for a `'static` context lifetime
-/// (appropriate for CLI / long-lived Wordkeep sidecar processes).
+/// (appropriate for a CLI or long-lived scoring process).
 pub struct EngineOwned {
     _backend: LlamaBackend,
     model: &'static LlamaModel,

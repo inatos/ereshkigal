@@ -63,10 +63,6 @@ Pinned in [`manifests/default.json`](manifests/default.json):
 
 Challenge candidates with `./scripts/bakeoff.sh`.
 
-## Wordkeep dogfood
-
-Betwixt Wordkeep keeps a lightweight `HeuristicScorer` by default. Swap in Ereshkigal later via a `Scorer` that shells/RPC to `semif-score` — do **not** load GGUF into the MCP process.
-
 ## License
 
 MIT. See [THIRD_PARTY.md](THIRD_PARTY.md) for SemIf/OpenJev and model notices.
