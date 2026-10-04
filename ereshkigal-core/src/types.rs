@@ -76,6 +76,10 @@ pub struct ScoreResult {
     pub allowed_token_mass: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub full_vocab_argmax_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibrated_probabilities: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
 }
 
 #[derive(Debug, Clone)]

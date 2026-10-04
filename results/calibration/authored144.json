@@ -1,0 +1,8 @@
+{
+  "rows": 144,
+  "temperature": 1.1160042443099332,
+  "accuracy": 0.8541666666666666,
+  "ece_t1": 0.060501390802781864,
+  "ece_calibrated": 0.0576370740844878,
+  "note": "argmax is unchanged by temperature; only confidence is rescaled"
+}

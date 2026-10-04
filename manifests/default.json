@@ -9,8 +9,8 @@
     "repo": "unsloth/Qwen3.5-4B-GGUF",
     "file": "Qwen3.5-4B-Q4_K_M.gguf",
     "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
-    "notes": "Pinned after local bakeoff on examples/decisions.jsonl (unsloth Q4_K_M). Re-run scripts/bakeoff.sh to challenge.",
-    "bytes": 2740937888
+    "bytes": 2740937888,
+    "notes": "Bakeoff winner by balanced accuracy on authored144: unsloth-qwen35-4b-q4km BA=0.8556"
   },
   "bakeoff_candidates": [
     {

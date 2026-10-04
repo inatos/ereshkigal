@@ -259,6 +259,8 @@ impl Scorer {
             copy_seconds,
             allowed_token_mass: Some(allowed.exp()),
             full_vocab_argmax_id: full_argmax,
+            calibrated_probabilities: None,
+            temperature: None,
         }
     }
 }

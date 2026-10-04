@@ -1,0 +1,15 @@
+{
+  "prompt_version": "direct-options-v1",
+  "tokenizer": {
+    "source": "Qwen/Qwen3-0.6B",
+    "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "chat_template": "qwen3_system_user_thinking_off"
+  },
+  "gguf": {
+    "repo": "Qwen/Qwen3-0.6B-GGUF",
+    "file": "Qwen3-0.6B-Q8_0.gguf",
+    "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+    "bytes": 639446688,
+    "notes": "CI smoke model only \u2014 not the quality pin"
+  }
+}

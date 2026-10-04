@@ -3,6 +3,7 @@
 //! Inspired by [SemIf / OpenJev](https://github.com/TheoLeeCJ/SemIf-OpenJev).
 //! Independent; not affiliated with Jev or TypeSafe.
 
+pub mod calib;
 pub mod engine;
 pub mod error;
 pub mod prompt;
@@ -12,6 +13,7 @@ pub mod tokenizer;
 pub mod types;
 pub mod validate;
 
+pub use calib::{apply_temperature, balanced_accuracy, ece, fit_temperature};
 pub use engine::{EngineConfig, EngineOwned};
 pub use error::{Error, Result};
 pub use prompt::{digest, direct_messages, render_prompt};
