@@ -64,6 +64,15 @@ Pinned in [`manifests/default.json`](manifests/default.json):
 Challenge candidates with `./scripts/bakeoff.sh` (see **Bakeoff**).
 
 
+
+## Comparison vs SemIf
+
+Head-to-head numbers: [`results/comparison.md`](results/comparison.md).
+
+On SemIf’s 144 authored decisions, published **Qwen3.5-4B BF16** mean-family BA is **0.813**. Ereshkigal’s pinned **unsloth Q4_K_M** GGUF scores **0.854** family BA / **0.856** global BA on CPU; bartowski Q4_K_M (the GGUF SemIf documents) scores **0.787**. Weights and hardware differ — this is not a same-checkpoint A/B. CI’s Qwen3-0.6B Q8_0 scores **0.521** family BA vs SemIf’s published 0.6B BF16 **0.440**.
+
+WANLI, TypeSafe-102, and perturbation sets are **not** scored in Ereshkigal yet.
+
 ## Bakeoff
 
 Accuracy-first GGUF bakeoff on SemIf `authored144` (balanced accuracy). Candidates
