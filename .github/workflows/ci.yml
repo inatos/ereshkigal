@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_gpu:
+        description: "Print GPU bench instructions (no hosted GPU)"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -75,3 +80,15 @@ jobs:
           ERESHKIGAL_SMOKE: "1"
         run: |
           cargo test -p ereshkigal-core --test parity_gguf -- --nocapture
+
+  gpu-bench:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_gpu == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: GPU bench is self-hosted
+        run: |
+          echo "This workflow has no GPU runner."
+          echo "On a CUDA host: cargo build -p ereshkigal --release --features cuda"
+          echo "N_GPU_LAYERS=999 ./scripts/bench_shape.sh models/Qwen3.5-4B-Q4_K_M.gguf"
+          echo "See docs/NOVEL.md"

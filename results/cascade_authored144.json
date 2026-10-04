@@ -1,0 +1,8 @@
+{
+  "draft": "Qwen3-0.6B-Q8_0",
+  "n": 144,
+  "frac_margin_gt_0.35": 0.9305555555555556,
+  "frac_margin_gt_0.90": 0.75,
+  "p50_margin": 0.9980730157921547,
+  "claim": "Measured draft margins; 4B verify not applied in this file"
+}

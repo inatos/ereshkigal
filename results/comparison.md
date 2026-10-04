@@ -56,3 +56,28 @@ Do not divide SemIf 3090 numbers into Ereshkigal CPU seconds.
 - `prompt_sha256` bit-exact vs HF tokenizer + SemIf `direct-options-v1` recipe (`enable_thinking` off).
 - Direct / serial / shared argmax + probabilities within `1e-4` on owned `examples/decisions.jsonl` for the pinned 4B GGUF.
 - Serial ≡ shared on `fixtures/shared_state.jsonl`.
+
+
+## Fair same-GGUF A/B (Measured / Proposed)
+
+Python SemIf `--backend llamacpp` vs Ereshkigal on the **same GGUF**. Run `./scripts/ab_llamacpp.sh`.
+
+Until `SEMIF_SCORE` is set, `results/ab_llamacpp.json` is **Proposed** (Ereshkigal-only). Do not headline unsloth Q4 vs SemIf BF16 as a win.
+
+## External gold (vendor / download)
+
+| Set | Status |
+| --- | --- |
+| authored144 | Vendored MIT; bakeoff pin unsloth Q4_K_M family BA **0.854** (Measured, CPU GGUF) |
+| perturbations108 | `./scripts/download_semif_fixtures.sh` (SemIf MIT) |
+| WANLI-256 / TypeSafe-102 | **Not vendored** (not in SemIf `benchmarks/data`). Reproduce via SemIf docs. |
+| shape15 | Synthetic 15-row shared-state bed for systems appendix |
+
+## Calibration (Measured, unsloth authored144)
+
+In-sample T≈1.116, ECE 0.061→0.058. **OOF 5-fold:** mean T≈1.114, ECE 0.061→**0.054**. Still weaker than SemIf’s published OOF 0.038 on BF16.
+
+## Systems (Measured CPU appendix)
+
+shape15 + Qwen3-0.6B Q8_0, 8 threads, `n_seq_max=8`: three shared batches of 5 ≈ 1.28–1.32 s wall. GPU `N_GPU_LAYERS` + SemIf shape777 is **Proposed** (`workflow_dispatch` / `scripts/bench_shape.sh`). Direct-vs-JSON 5.21× remains SemIf’s 3090 number, not ours.
+

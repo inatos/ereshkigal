@@ -24,6 +24,7 @@ pub struct EngineConfig {
     pub max_prompt_tokens: usize,
     pub threads: i32,
     pub n_gpu_layers: u32,
+    pub n_seq_max: u32,
 }
 
 /// Process-scoped llama.cpp scorer. The model is leaked for a `'static` context lifetime
@@ -34,6 +35,7 @@ pub struct EngineOwned {
     ctx: LlamaContext<'static>,
     pub meta: ModelMeta,
     pub gguf_path: PathBuf,
+    pub n_seq_max: u32,
 }
 
 unsafe impl Send for EngineOwned {}
@@ -61,12 +63,13 @@ impl EngineOwned {
             .map_err(|e| Error::Engine(format!("load GGUF: {e}")))?;
         let model: &'static LlamaModel = Box::leak(Box::new(model));
 
+        let n_seq_max = cfg.n_seq_max.max(1);
         let ctx_tokens = (cfg.max_prompt_tokens as u32).saturating_add(64);
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(ctx_tokens))
             .with_n_threads(cfg.threads)
             .with_n_threads_batch(cfg.threads)
-            .with_n_seq_max(1);
+            .with_n_seq_max(n_seq_max);
 
         let ctx = model
             .new_context(&backend, ctx_params)
@@ -96,6 +99,7 @@ impl EngineOwned {
                 ctx,
                 meta,
                 gguf_path: cfg.gguf,
+                n_seq_max,
             },
             tokenizer,
         ))
@@ -107,11 +111,11 @@ impl EngineOwned {
 
     pub fn full_logits(&mut self, tokens: &[i32]) -> Result<Vec<f32>> {
         self.clear();
-        self.decode_logits(tokens, 0)
+        self.decode_logits_seq(tokens, 0, 0)
     }
 
     pub fn prefill(&mut self, prefix: &[i32]) -> Result<()> {
-        let _ = self.decode_logits(prefix, 0)?;
+        let _ = self.decode_logits_seq(prefix, 0, 0)?;
         Ok(())
     }
 
@@ -137,7 +141,69 @@ impl EngineOwned {
     }
 
     pub fn branch_logits(&mut self, prefix_len: usize, suffix: &[i32]) -> Result<Vec<f32>> {
-        self.decode_logits(suffix, prefix_len as i32)
+        self.decode_logits_seq(suffix, prefix_len as i32, 0)
+    }
+
+    /// Copy KV from seq 0 onto `dest` (parallel suffixes).
+    pub fn copy_seq(&mut self, src: i32, dest: i32) -> Result<()> {
+        self.ctx
+            .copy_kv_cache_seq(src, dest, None, None)
+            .map_err(|e| Error::Engine(format!("copy_kv_cache_seq: {e}")))
+    }
+
+    /// Decode several suffixes in one batch after prefix lives on seq 0.
+    /// Copies seq 0 → 0..n-1 then decodes each suffix on its seq id.
+    pub fn decode_suffixes_parallel(
+        &mut self,
+        prefix_len: usize,
+        suffixes: &[Vec<i32>],
+    ) -> Result<Vec<Vec<f32>>> {
+        if suffixes.is_empty() {
+            return Err(Error::Engine("no suffixes to decode".into()));
+        }
+        if suffixes.len() as u32 > self.n_seq_max {
+            return Err(Error::Engine(format!(
+                "batch of {} suffixes exceeds n_seq_max {}",
+                suffixes.len(),
+                self.n_seq_max
+            )));
+        }
+        for (i, suf) in suffixes.iter().enumerate() {
+            if suf.is_empty() {
+                return Err(Error::Engine(format!("empty suffix at {i}")));
+            }
+            if i > 0 {
+                self.copy_seq(0, i as i32)?;
+            }
+        }
+        let n_tokens: usize = suffixes.iter().map(|s| s.len()).sum();
+        let mut batch = LlamaBatch::new(n_tokens.max(1), self.n_seq_max as i32);
+        let mut last_offsets: Vec<i32> = Vec::with_capacity(suffixes.len());
+        for (seq, suf) in suffixes.iter().enumerate() {
+            for (i, &tok) in suf.iter().enumerate() {
+                let pos = prefix_len as i32 + i as i32;
+                let want = i + 1 == suf.len();
+                batch
+                    .add(LlamaToken(tok), pos, &[seq as i32], want)
+                    .map_err(|e| Error::Engine(format!("batch.add: {e}")))?;
+                if want {
+                    last_offsets.push(batch.n_tokens() - 1);
+                }
+            }
+        }
+        self.ctx
+            .decode(&mut batch)
+            .map_err(|e| Error::Engine(format!("parallel llama_decode: {e}")))?;
+        let n_vocab = self.model.n_vocab() as usize;
+        let mut out = Vec::with_capacity(suffixes.len());
+        for off in last_offsets {
+            let logits = self.ctx.get_logits_ith(off);
+            if logits.len() < n_vocab {
+                return Err(Error::Engine("short parallel logits".into()));
+            }
+            out.push(logits[..n_vocab].to_vec());
+        }
+        Ok(out)
     }
 
     pub fn gguf_tokenize(&self, text: &str) -> Result<Vec<i32>> {
@@ -145,14 +211,14 @@ impl EngineOwned {
         Ok(tokens.into_iter().map(|t| t.0).collect())
     }
 
-    fn decode_logits(&mut self, tokens: &[i32], start: i32) -> Result<Vec<f32>> {
+    fn decode_logits_seq(&mut self, tokens: &[i32], start: i32, seq: i32) -> Result<Vec<f32>> {
         if tokens.is_empty() {
             return Err(Error::Engine(
                 "Refusing to decode an empty token list".into(),
             ));
         }
         let n_vocab = self.model.n_vocab() as usize;
-        let mut batch = LlamaBatch::new(DECODE_CHUNK, 1);
+        let mut batch = LlamaBatch::new(DECODE_CHUNK, self.n_seq_max.max(1) as i32);
         let total = tokens.len();
         for offset in (0..total).step_by(DECODE_CHUNK) {
             let end = (offset + DECODE_CHUNK).min(total);
@@ -162,7 +228,7 @@ impl EngineOwned {
                 let pos = start + offset as i32 + i as i32;
                 let want_logits = offset + i == total - 1;
                 batch
-                    .add(LlamaToken(tok), pos, &[0], want_logits)
+                    .add(LlamaToken(tok), pos, &[seq], want_logits)
                     .map_err(|e| Error::Engine(format!("batch.add: {e}")))?;
             }
             self.ctx
@@ -171,7 +237,6 @@ impl EngineOwned {
                     "llama_decode failed; raise --max-tokens if prompts grew: {e}"
                 )))?;
         }
-        // llama-cpp-2 tracks batch offsets in initialized_logits; use contiguous last-token logits.
         let logits = self.ctx.get_logits();
         if logits.len() < n_vocab {
             return Err(Error::Engine("llama.cpp returned short logits".into()));

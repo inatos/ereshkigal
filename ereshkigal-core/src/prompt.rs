@@ -78,7 +78,22 @@ pub fn render_qwen3_thinking_off(messages: &[(String, String)]) -> Result<String
 }
 
 pub fn render_prompt(row: &DecisionRow) -> Result<String> {
-    let messages = direct_messages(row)?;
+    render_prompt_version(row, PROMPT_VERSION)
+}
+
+pub fn render_prompt_version(row: &DecisionRow, version: &str) -> Result<String> {
+    let messages = match version {
+        PROMPT_VERSION => direct_messages(row)?,
+        crate::types::PROMPT_VERSION_OUTLINE => {
+            let outline = crate::outline::outline_state(&row.state)?;
+            let mut clone = row.clone();
+            clone.state = Value::String(format!("[state-outline-v1]\n{outline}"));
+            direct_messages(&clone)?
+        }
+        other => {
+            return Err(Error::Validation(format!("unknown prompt_version {other}")));
+        }
+    };
     render_qwen3_thinking_off(&messages)
 }
 
@@ -94,8 +109,20 @@ pub fn prompt_version() -> &'static str {
 
 /// Evidence-prefix token boundary used by serial/shared modes (upstream `_state_prefix`).
 pub fn state_prefix_text(row: &DecisionRow) -> Result<String> {
-    let prompt = render_prompt(row)?;
-    let messages = direct_messages(row)?;
+    state_prefix_text_version(row, PROMPT_VERSION)
+}
+
+pub fn state_prefix_text_version(row: &DecisionRow, version: &str) -> Result<String> {
+    let prompt = render_prompt_version(row, version)?;
+    let messages = match version {
+        crate::types::PROMPT_VERSION_OUTLINE => {
+            let outline = crate::outline::outline_state(&row.state)?;
+            let mut clone = row.clone();
+            clone.state = Value::String(format!("[state-outline-v1]\n{outline}"));
+            direct_messages(&clone)?
+        }
+        _ => direct_messages(row)?,
+    };
     let payload = &messages[1].1;
     let mut evidence_obj = serde_json::Map::new();
     evidence_obj.insert("evidence".into(), row.state.clone());
@@ -221,5 +248,18 @@ mod tests {
             digest(&render_prompt(&policy).unwrap()),
             "6884fc4a9117b63369dd79e3042b92f92678f1e08dba2600e93d1da6754b1787"
         );
+    }
+
+    #[test]
+    fn outline_version_does_not_change_v1_hash() {
+        let v1 = digest(&render_prompt(&support_row()).unwrap());
+        assert_eq!(
+            v1,
+            "7ac35785358f0c656eeb741ca0a51f03e0133753a71e2879a18ad0ab56d0c024"
+        );
+        let outline = render_prompt_version(&support_row(), crate::types::PROMPT_VERSION_OUTLINE)
+            .unwrap();
+        assert_ne!(digest(&outline), v1);
+        assert!(outline.contains("[state-outline-v1]"));
     }
 }

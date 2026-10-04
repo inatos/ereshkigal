@@ -17,6 +17,14 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokenizers.workspace = true
+tree-sitter.workspace = true
+tree-sitter-json.workspace = true
+
+[features]
+default = []
+cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
+metal = ["llama-cpp-2/metal"]
 
 [dev-dependencies]
 serde_json.workspace = true

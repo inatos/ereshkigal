@@ -109,6 +109,7 @@ fn gguf_direct_serial_shared_parity() {
         max_prompt_tokens: 4096,
         threads,
         n_gpu_layers: 0,
+        n_seq_max: 8,
     })
     .expect("load engine");
     let mut scorer = Scorer::new(engine, tokenizer);

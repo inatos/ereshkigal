@@ -1,8 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ereshkigal_core::{
-    apply_temperature, decision_argmax, ece, fit_temperature, DecisionRow, EngineConfig,
-    EngineOwned, ScoreResult, Scorer,
+    apply_temperature, cascade_select, decision_argmax, ece, fit_temperature, fit_temperature_oof,
+    top2_margin, DecisionRow, EngineConfig, EngineOwned, ScoreResult, Scorer,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -63,9 +63,29 @@ struct Cli {
     #[arg(long = "llama-threads", global = true)]
     llama_threads: Option<i32>,
 
-    /// GPU layers to offload (0 = CPU only)
+    /// GPU layers to offload (0 = CPU only). Use a large number to offload all.
     #[arg(long, default_value_t = 0, global = true)]
     n_gpu_layers: u32,
+
+    /// Max llama.cpp sequences (parallel shared suffixes)
+    #[arg(long, default_value_t = 32, global = true)]
+    n_seq_max: u32,
+
+    /// Prompt recipe (`direct-options-v1` or `state-outline-v1`)
+    #[arg(long, default_value = "direct-options-v1", global = true)]
+    prompt_version: String,
+
+    /// Disable prompt_sha256 replay cache
+    #[arg(long, global = true)]
+    no_replay: bool,
+
+    /// Disable token-prefix radix KV cache
+    #[arg(long, global = true)]
+    no_radix: bool,
+
+    /// Disable parallel suffix decode in shared mode
+    #[arg(long, global = true)]
+    no_parallel_suffixes: bool,
 
     /// Optional temperature for calibrated_probabilities (argmax unchanged)
     #[arg(long, global = true)]
@@ -93,6 +113,30 @@ enum Commands {
         /// Skip fitting; apply this temperature
         #[arg(long)]
         temperature: Option<f64>,
+        /// K-fold OOF ECE (0 = in-sample only)
+        #[arg(long, default_value_t = 5)]
+        oof_folds: usize,
+    },
+    /// Draft/verify letter-slot cascade (0.6B logits JSONL + optional 4B GGUF)
+    Cascade {
+        /// Gold or input decisions JSONL
+        #[arg(long)]
+        input: PathBuf,
+        /// Draft predictions JSONL (option_logits)
+        #[arg(long)]
+        draft: PathBuf,
+        /// Output JSONL
+        #[arg(long)]
+        output: PathBuf,
+        /// Commit draft when top-1 − top-2 > tau
+        #[arg(long, default_value_t = 0.35)]
+        tau: f64,
+        /// Verify GGUF for low-margin rows (required unless --draft-only)
+        #[arg(long)]
+        verify_gguf: Option<PathBuf>,
+        /// Skip verify (measure skip rate only; low-margin rows keep draft)
+        #[arg(long)]
+        draft_only: bool,
     },
 }
 
@@ -105,7 +149,43 @@ fn main() -> Result<()> {
             report,
             calibrated_out,
             temperature,
-        }) => run_calibrate(gold, predictions, report, calibrated_out, temperature),
+            oof_folds,
+        }) => run_calibrate(
+            gold,
+            predictions,
+            report,
+            calibrated_out,
+            temperature,
+            oof_folds,
+        ),
+        Some(Commands::Cascade {
+            input,
+            draft,
+            output,
+            tau,
+            verify_gguf,
+            draft_only,
+        }) => run_cascade(
+            EngineConfig {
+                gguf: verify_gguf
+                    .clone()
+                    .or(cli.gguf.clone())
+                    .unwrap_or_else(|| PathBuf::from("")),
+                tokenizer_source: cli.model.clone(),
+                tokenizer_revision: cli.revision.clone(),
+                max_prompt_tokens: cli.max_tokens,
+                threads: cli.llama_threads.unwrap_or(4),
+                n_gpu_layers: cli.n_gpu_layers,
+                n_seq_max: cli.n_seq_max,
+            },
+            cli.prompt_version.clone(),
+            draft_only,
+            verify_gguf.or(cli.gguf.clone()),
+            input,
+            draft,
+            output,
+            tau,
+        ),
         Some(Commands::Score) | None => run_score(cli),
     }
 }
@@ -130,10 +210,15 @@ fn run_score(cli: Cli) -> Result<()> {
         max_prompt_tokens: cli.max_tokens,
         threads,
         n_gpu_layers: cli.n_gpu_layers,
+        n_seq_max: cli.n_seq_max,
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mut scorer = Scorer::new(engine, tokenizer);
+    scorer.prompt_version = cli.prompt_version.clone();
+    scorer.replay_enabled = !cli.no_replay;
+    scorer.radix_enabled = !cli.no_radix;
+    scorer.parallel_suffixes = !cli.no_parallel_suffixes;
     let rows = read_jsonl(&input)?;
     if rows.is_empty() {
         bail!("input contained no decisions");
@@ -232,6 +317,7 @@ fn run_calibrate(
     report_path: PathBuf,
     calibrated_out: Option<PathBuf>,
     fixed_t: Option<f64>,
+    oof_folds: usize,
 ) -> Result<()> {
     let gold: Vec<GoldRow> = read_any_jsonl(&gold_path)?;
     let preds: Vec<PredRow> = read_any_jsonl(&pred_path)?;
@@ -258,6 +344,11 @@ fn run_calibrate(
     };
     let ece_raw = ece(&rows, 1.0, 10).map_err(|e| anyhow::anyhow!("{e}"))?;
     let ece_cal = ece(&rows, t, 10).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let oof = if oof_folds >= 2 {
+        Some(fit_temperature_oof(&rows, oof_folds).map_err(|e| anyhow::anyhow!("{e}"))?)
+    } else {
+        None
+    };
 
     let mut correct = 0usize;
     for (logits, gold) in &rows {
@@ -272,7 +363,8 @@ fn run_calibrate(
         "accuracy": correct as f64 / rows.len() as f64,
         "ece_t1": ece_raw,
         "ece_calibrated": ece_cal,
-        "note": "argmax is unchanged by temperature; only confidence is rescaled",
+        "oof": oof,
+        "note": "argmax is unchanged by temperature; only confidence is rescaled. oof is k-fold holdout ECE.",
     });
     if let Some(parent) = report_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -294,6 +386,86 @@ fn run_calibrate(
         }
         eprintln!("wrote {}", out_path.display());
     }
+    Ok(())
+}
+
+fn run_cascade(
+    cfg: EngineConfig,
+    prompt_version: String,
+    draft_only: bool,
+    verify_gguf: Option<PathBuf>,
+    input: PathBuf,
+    draft_path: PathBuf,
+    output: PathBuf,
+    tau: f64,
+) -> Result<()> {
+    let rows: Vec<DecisionRow> = read_jsonl(&input)?;
+    let drafts: Vec<PredRow> = read_any_jsonl(&draft_path)?;
+    let mut by_id = std::collections::HashMap::new();
+    for d in &drafts {
+        by_id.insert(d.id.clone(), d);
+    }
+    let mut scorer = if draft_only {
+        None
+    } else {
+        let gguf = verify_gguf
+            .filter(|p| p.as_os_str().len() > 0)
+            .or_else(|| {
+                if cfg.gguf.as_os_str().is_empty() {
+                    None
+                } else {
+                    Some(cfg.gguf.clone())
+                }
+            })
+            .ok_or_else(|| anyhow::anyhow!("cascade needs --verify-gguf or --gguf"))?;
+        let mut load = cfg;
+        load.gguf = gguf;
+        let (engine, tokenizer) = EngineOwned::load(load).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut s = Scorer::new(engine, tokenizer);
+        s.prompt_version = prompt_version;
+        Some(s)
+    };
+    let mut out = File::create(&output)?;
+    let mut n_draft = 0usize;
+    let mut n_verify = 0usize;
+    let mut n_forced = 0usize;
+    for row in &rows {
+        let draft = by_id
+            .get(&row.id)
+            .ok_or_else(|| anyhow::anyhow!("missing draft for {}", row.id))?;
+        let margin = top2_margin(&draft.option_logits).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let commit_draft = margin > tau;
+        let outcome = if commit_draft {
+            n_draft += 1;
+            cascade_select(&draft.option_logits, None, tau).map_err(|e| anyhow::anyhow!("{e}"))?
+        } else if let Some(s) = scorer.as_mut() {
+            n_verify += 1;
+            let verified = s.score_direct(row).map_err(|e| anyhow::anyhow!("{e}"))?;
+            cascade_select(&draft.option_logits, Some(&verified.option_logits), tau)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        } else {
+            n_forced += 1;
+            let mut o = cascade_select(&draft.option_logits, None, 0.0)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            o.source = "cascade-draft-forced";
+            o
+        };
+        let v = json!({
+            "id": row.id,
+            "probabilities": outcome.probabilities,
+            "option_logits": draft.option_logits,
+            "cascade_source": outcome.source,
+            "used_verify": outcome.used_verify,
+            "draft_margin": outcome.draft_margin,
+            "tau": tau,
+        });
+        serde_json::to_writer(&mut out, &v)?;
+        out.write_all(b"\n")?;
+    }
+    eprintln!(
+        "cascade tau={tau} draft_commit={n_draft} verify={n_verify} draft_forced={n_forced} total={}",
+        rows.len()
+    );
     Ok(())
 }
 

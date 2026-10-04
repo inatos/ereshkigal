@@ -4,5 +4,18 @@
   "accuracy": 0.8541666666666666,
   "ece_t1": 0.060501390802781864,
   "ece_calibrated": 0.0576370740844878,
-  "note": "argmax is unchanged by temperature; only confidence is rescaled"
+  "oof": {
+    "folds": 5,
+    "mean_temperature": 1.1135995196198636,
+    "ece_t1_oof": 0.06050139080278191,
+    "ece_calibrated_oof": 0.054214614250026584,
+    "fold_temperatures": [
+      0.9525061379771524,
+      1.1911951710394628,
+      1.2037361318550028,
+      1.1698610358569579,
+      1.050699121370743
+    ]
+  },
+  "note": "argmax is unchanged by temperature; only confidence is rescaled. oof is k-fold holdout ECE."
 }

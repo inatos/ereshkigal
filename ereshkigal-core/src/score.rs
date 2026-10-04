@@ -1,5 +1,7 @@
+use crate::cache::{PrefixRadix, ReplayCache};
 use crate::engine::EngineOwned;
 use crate::error::{Error, Result};
+use crate::gbnf::{letter_gbnf, slots_match_letters};
 use crate::softmax::{argmax, softmax};
 use crate::tokenizer::ReferenceTokenizer;
 use crate::types::{DecisionRow, EncodedDecision, ModelMeta, ScoreResult, PROMPT_VERSION};
@@ -11,6 +13,12 @@ pub struct Scorer {
     tokenizer: ReferenceTokenizer,
     max_tokens: usize,
     serial: SerialCache,
+    replay: ReplayCache,
+    radix: PrefixRadix,
+    pub prompt_version: String,
+    pub replay_enabled: bool,
+    pub radix_enabled: bool,
+    pub parallel_suffixes: bool,
 }
 
 struct SerialCache {
@@ -29,6 +37,12 @@ impl Scorer {
                 prefix: None,
                 state: None,
             },
+            replay: ReplayCache::default(),
+            radix: PrefixRadix::default(),
+            prompt_version: PROMPT_VERSION.to_string(),
+            replay_enabled: true,
+            radix_enabled: true,
+            parallel_suffixes: true,
         }
     }
 
@@ -37,7 +51,11 @@ impl Scorer {
     }
 
     pub fn encode_verified(&self, row: &DecisionRow) -> Result<EncodedDecision> {
-        let enc = self.tokenizer.encode_decision(row, self.max_tokens)?;
+        let enc = self.tokenizer.encode_decision_version(
+            row,
+            self.max_tokens,
+            &self.prompt_version,
+        )?;
         let gguf = self.engine.gguf_tokenize(&enc.prompt)?;
         if gguf != enc.token_ids {
             return Err(Error::Validation(format!(
@@ -45,16 +63,46 @@ impl Scorer {
                 row.id
             )));
         }
+        let _ = letter_gbnf(row.options.len())?;
+        slots_match_letters(&enc.slots, &enc.slots)?;
         Ok(enc)
     }
 
     pub fn score_direct(&mut self, row: &DecisionRow) -> Result<ScoreResult> {
         let started = Instant::now();
         let enc = self.encode_verified(row)?;
-        let mark = Instant::now();
-        let vocabulary = self.engine.full_logits(&enc.token_ids)?;
-        let forward = mark.elapsed().as_secs_f64();
-        Ok(self.finish(
+        if self.replay_enabled {
+            if let Some(hit) = self.replay.get(&enc.prompt_sha256) {
+                let mut cloned = hit.clone();
+                cloned.replay_hit = Some(true);
+                cloned.cache_hit = Some(true);
+                cloned.total_seconds = Some(started.elapsed().as_secs_f64());
+                cloned.forward_seconds = Some(0.0);
+                return Ok(cloned);
+            }
+        }
+        let mut radix_len = None;
+        let vocabulary = if self.radix_enabled {
+            if let Some((plen, st)) = self.radix.longest(&enc.token_ids) {
+                if plen < enc.token_ids.len() {
+                    radix_len = Some(plen);
+                    self.engine.restore_state(st)?;
+                    self.engine
+                        .branch_logits(plen, &enc.token_ids[plen..])?
+                } else {
+                    self.engine.full_logits(&enc.token_ids)?
+                }
+            } else {
+                self.engine.full_logits(&enc.token_ids)?
+            }
+        } else {
+            let mark = Instant::now();
+            let v = self.engine.full_logits(&enc.token_ids)?;
+            let _ = mark;
+            v
+        };
+        let forward = started.elapsed().as_secs_f64();
+        let mut result = self.finish(
             row,
             &enc,
             &vocabulary,
@@ -67,13 +115,21 @@ impl Scorer {
             None,
             None,
             None,
-        ))
+        );
+        result.replay_hit = Some(false);
+        result.radix_prefix_tokens = radix_len;
+        if self.replay_enabled {
+            self.replay.insert(enc.prompt_sha256.clone(), result.clone());
+        }
+        Ok(result)
     }
 
     pub fn score_serial(&mut self, row: &DecisionRow) -> Result<ScoreResult> {
         let started = Instant::now();
         let enc = self.encode_verified(row)?;
-        let prefix = self.tokenizer.state_prefix_ids(row)?;
+        let prefix = self
+            .tokenizer
+            .state_prefix_ids_version(row, &self.prompt_version)?;
         if prefix.is_empty()
             || enc.token_ids.len() <= prefix.len()
             || enc.token_ids[..prefix.len()] != prefix[..]
@@ -82,13 +138,31 @@ impl Scorer {
                 "State prefix does not match the full prompt".into(),
             ));
         }
-        let hit = self.serial.state.is_some() && self.serial.prefix.as_ref() == Some(&prefix);
+        let mut hit = self.serial.state.is_some() && self.serial.prefix.as_ref() == Some(&prefix);
         let mut prefill_seconds = 0.0;
+        if !hit {
+            if self.radix_enabled {
+                if let Some((plen, st)) = self.radix.longest(&prefix) {
+                    if plen == prefix.len() {
+                        self.engine.restore_state(st)?;
+                        hit = true;
+                    }
+                }
+            }
+        }
         if !hit {
             let mark = Instant::now();
             self.engine.clear();
             self.engine.prefill(&prefix)?;
             prefill_seconds = mark.elapsed().as_secs_f64();
+            self.serial.prefix = Some(prefix.clone());
+            let st = self.engine.save_state()?;
+            self.serial.state = Some(st.clone());
+            if self.radix_enabled {
+                self.radix.insert(&prefix, st);
+            }
+        } else if self.serial.state.is_none() {
+            // restored from radix into ctx; capture for serial cache
             self.serial.prefix = Some(prefix.clone());
             self.serial.state = Some(self.engine.save_state()?);
         }
@@ -145,7 +219,9 @@ impl Scorer {
             .iter()
             .map(|r| self.encode_verified(r))
             .collect::<Result<_>>()?;
-        let prefix = self.tokenizer.state_prefix_ids(&rows[0])?;
+        let prefix = self
+            .tokenizer
+            .state_prefix_ids_version(&rows[0], &self.prompt_version)?;
         if prefix.is_empty()
             || encoded
                 .iter()
@@ -158,37 +234,74 @@ impl Scorer {
         let encode_seconds = started.elapsed().as_secs_f64();
 
         let mark = Instant::now();
-        self.engine.clear();
-        self.engine.prefill(&prefix)?;
+        let mut radix_hit = false;
+        if self.radix_enabled {
+            if let Some((plen, st)) = self.radix.longest(&prefix) {
+                if plen == prefix.len() {
+                    self.engine.restore_state(st)?;
+                    radix_hit = true;
+                }
+            }
+        }
+        if !radix_hit {
+            self.engine.clear();
+            self.engine.prefill(&prefix)?;
+            let st = self.engine.save_state()?;
+            if self.radix_enabled {
+                self.radix.insert(&prefix, st);
+            }
+        }
         let state = self.engine.save_state()?;
         let prefill_seconds = mark.elapsed().as_secs_f64();
 
+        let suffixes: Vec<Vec<i32>> = encoded
+            .iter()
+            .map(|e| e.token_ids[prefix.len()..].to_vec())
+            .collect();
+
         let mut copy_seconds = 0.0;
         let mut suffix_seconds = 0.0;
-        let mut results = Vec::with_capacity(rows.len());
-        for (row, enc) in rows.iter().zip(encoded.iter()) {
+        let vocabularies: Vec<Vec<f32>> = if self.parallel_suffixes
+            && suffixes.len() > 1
+            && suffixes.len() as u32 <= self.engine.n_seq_max
+        {
             let mark = Instant::now();
-            self.engine.restore_state(&state)?;
-            copy_seconds += mark.elapsed().as_secs_f64();
-            let mark = Instant::now();
-            let vocabulary = self
+            let v = self
                 .engine
-                .branch_logits(prefix.len(), &enc.token_ids[prefix.len()..])?;
-            suffix_seconds += mark.elapsed().as_secs_f64();
-            results.push(self.finish(
+                .decode_suffixes_parallel(prefix.len(), &suffixes)?;
+            suffix_seconds = mark.elapsed().as_secs_f64();
+            v
+        } else {
+            let mut vs = Vec::with_capacity(rows.len());
+            for suf in &suffixes {
+                let mark = Instant::now();
+                self.engine.restore_state(&state)?;
+                copy_seconds += mark.elapsed().as_secs_f64();
+                let mark = Instant::now();
+                vs.push(self.engine.branch_logits(prefix.len(), suf)?);
+                suffix_seconds += mark.elapsed().as_secs_f64();
+            }
+            vs
+        };
+
+        let mut results = Vec::with_capacity(rows.len());
+        for ((row, enc), vocabulary) in rows.iter().zip(encoded.iter()).zip(vocabularies.iter()) {
+            let mut r = self.finish(
                 row,
                 enc,
-                &vocabulary,
+                vocabulary,
                 "llamacpp-state-restore-shared-v1",
                 "quantized branch last-position logits over a restored prefix state",
                 None,
                 None,
-                None,
+                Some(radix_hit),
                 Some(prefix.len()),
                 None,
                 None,
                 None,
-            ));
+            );
+            r.radix_prefix_tokens = Some(prefix.len());
+            results.push(r);
         }
 
         let true_suffix: usize = encoded.iter().map(|e| e.token_ids.len() - prefix.len()).sum();
@@ -246,7 +359,7 @@ impl Scorer {
             answer_token_ids: enc.slots.clone(),
             input_tokens: enc.token_ids.len(),
             prompt_sha256: enc.prompt_sha256.clone(),
-            prompt_version: PROMPT_VERSION.to_string(),
+            prompt_version: self.prompt_version.clone(),
             model,
             readout: readout.to_string(),
             probability_status: "conditional option score over quantized weights; uncalibrated as decision confidence".into(),
@@ -261,6 +374,9 @@ impl Scorer {
             full_vocab_argmax_id: full_argmax,
             calibrated_probabilities: None,
             temperature: None,
+            cascade_source: None,
+            replay_hit: None,
+            radix_prefix_tokens: None,
         }
     }
 }

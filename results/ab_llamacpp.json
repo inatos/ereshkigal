@@ -1,0 +1,8 @@
+{
+  "n": 3,
+  "argmax_agree": null,
+  "note": "Python SemIf not run (SEMIF_SCORE unset)",
+  "mean_ereshkigal_s": 0.5794140183333333,
+  "gguf": "Qwen3-0.6B-Q8_0.gguf",
+  "claim": "Proposed until SEMIF_SCORE is provided"
+}

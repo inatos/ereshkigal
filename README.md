@@ -69,9 +69,14 @@ Challenge candidates with `./scripts/bakeoff.sh` (see **Bakeoff**).
 
 Head-to-head numbers: [`results/comparison.md`](results/comparison.md).
 
-On SemIf’s 144 authored decisions, published **Qwen3.5-4B BF16** mean-family BA is **0.813**. Ereshkigal’s pinned **unsloth Q4_K_M** GGUF scores **0.854** family BA / **0.856** global BA on CPU; bartowski Q4_K_M (the GGUF SemIf documents) scores **0.787**. Weights and hardware differ — this is not a same-checkpoint A/B. CI’s Qwen3-0.6B Q8_0 scores **0.521** family BA vs SemIf’s published 0.6B BF16 **0.440**.
+On SemIf’s 144 authored decisions, published **Qwen3.5-4B BF16** mean-family BA is **0.813**. Ereshkigal’s pinned **unsloth Q4_K_M** GGUF scores **0.854** family BA / **0.856** global BA on CPU; bartowski Q4_K_M scores **0.787**. Weights and hardware differ — **not** a same-checkpoint A/B. Run `./scripts/ab_llamacpp.sh` with `SEMIF_SCORE` for a fair llamacpp A/B ([`results/comparison.md`](results/comparison.md)).
 
-WANLI, TypeSafe-102, and perturbation sets are **not** scored in Ereshkigal yet.
+WANLI and TypeSafe-102 are not vendored (not in SemIf `benchmarks/data`). Perturbations: `./scripts/download_semif_fixtures.sh`.
+
+GPU CUDA/Vulkan: `cargo build -p ereshkigal --release --features cuda` then `--n-gpu-layers 999`. CI stays CPU 0.6B smoke. GPU shape bench is `workflow_dispatch` / `./scripts/bench_shape.sh`.
+
+Novel operators (cascade, `state-outline-v1`, radix/replay, GBNF): [`docs/NOVEL.md`](docs/NOVEL.md).
+
 
 ## Bakeoff
 
@@ -103,7 +108,7 @@ Per-workload temperature scaling: `softmax(logits / T)`. Argmax is unchanged.
   --report results/calibration/authored144.json
 ```
 
-Committed fit for the bakeoff winner: `results/calibration/authored144.json`.
+Committed fit for the bakeoff winner: `results/calibration/authored144.json` (includes 5-fold OOF ECE).
 
 ## CI smoke model
 

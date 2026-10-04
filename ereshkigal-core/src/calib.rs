@@ -64,6 +64,124 @@ pub fn fit_temperature(rows: &[(Vec<f64>, usize)]) -> Result<f64> {
     Ok(t)
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OofCalib {
+    pub folds: usize,
+    pub mean_temperature: f64,
+    pub ece_t1_oof: f64,
+    pub ece_calibrated_oof: f64,
+    pub fold_temperatures: Vec<f64>,
+}
+
+/// K-fold out-of-fold temperature fit (Guo-style). Fit T on train folds, score ECE on holdout.
+pub fn fit_temperature_oof(rows: &[(Vec<f64>, usize)], folds: usize) -> Result<OofCalib> {
+    let folds = folds.max(2);
+    if rows.len() < folds {
+        return Err(Error::Validation(
+            "need at least as many labeled rows as OOF folds".into(),
+        ));
+    }
+    let mut fold_temps = Vec::new();
+    let mut holdout_raw: Vec<(Vec<f64>, usize)> = Vec::new();
+    let mut holdout_cal: Vec<(Vec<f64>, usize, f64)> = Vec::new();
+    for f in 0..folds {
+        let train: Vec<(Vec<f64>, usize)> = rows
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % folds != f)
+            .map(|(_, r)| r.clone())
+            .collect();
+        let test: Vec<(Vec<f64>, usize)> = rows
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % folds == f)
+            .map(|(_, r)| r.clone())
+            .collect();
+        if train.is_empty() || test.is_empty() {
+            continue;
+        }
+        let t = fit_temperature(&train)?;
+        fold_temps.push(t);
+        for row in test {
+            holdout_raw.push(row.clone());
+            holdout_cal.push((row.0, row.1, t));
+        }
+    }
+    if fold_temps.is_empty() {
+        return Err(Error::Validation("OOF folds produced no train/test split".into()));
+    }
+    let mean_t = fold_temps.iter().sum::<f64>() / fold_temps.len() as f64;
+    let ece_t1 = ece(&holdout_raw, 1.0, 10)?;
+    // ECE with per-fold T applied to that fold's holdout.
+    let mut scaled = Vec::new();
+    for (logits, gold, t) in &holdout_cal {
+        let probs = apply_temperature(logits, *t)?;
+        // Recover logits-as-log-probs isn't needed; ece() re-applies T.
+        scaled.push((logits.clone(), *gold, *t));
+        let _ = probs;
+    }
+    let mut ece_cal = 0.0;
+    let n = scaled.len() as f64;
+    // Weighted mean of per-row |acc-conf| via pooling with each row's own T.
+    let bins = 10usize;
+    let mut bin_correct = vec![0.0; bins];
+    let mut bin_conf = vec![0.0; bins];
+    let mut bin_count = vec![0.0; bins];
+    for (logits, gold, t) in &scaled {
+        let probs = apply_temperature(logits, *t)?;
+        let pred = argmax(&probs).unwrap();
+        let conf = probs[pred];
+        let b = ((conf * bins as f64).floor() as usize).min(bins - 1);
+        bin_count[b] += 1.0;
+        bin_conf[b] += conf;
+        if pred == *gold {
+            bin_correct[b] += 1.0;
+        }
+    }
+    for b in 0..bins {
+        if bin_count[b] == 0.0 {
+            continue;
+        }
+        let acc = bin_correct[b] / bin_count[b];
+        let avg_conf = bin_conf[b] / bin_count[b];
+        ece_cal += (bin_count[b] / n) * (acc - avg_conf).abs();
+    }
+    Ok(OofCalib {
+        folds: fold_temps.len(),
+        mean_temperature: mean_t,
+        ece_t1_oof: ece_t1,
+        ece_calibrated_oof: ece_cal,
+        fold_temperatures: fold_temps,
+    })
+}
+
+/// Unweighted mean of per-family balanced accuracy.
+pub fn mean_family_balanced_accuracy(
+    families: &[String],
+    pred: &[usize],
+    gold: &[usize],
+    n_classes: usize,
+) -> f64 {
+    assert_eq!(families.len(), pred.len());
+    assert_eq!(pred.len(), gold.len());
+    use std::collections::HashMap;
+    let mut by: HashMap<&str, (Vec<usize>, Vec<usize>)> = HashMap::new();
+    for i in 0..families.len() {
+        let e = by.entry(families[i].as_str()).or_default();
+        e.0.push(pred[i]);
+        e.1.push(gold[i]);
+    }
+    if by.is_empty() {
+        return 0.0;
+    }
+    let nfam = by.len() as f64;
+    let mut sum = 0.0;
+    for (_, (p, g)) in by {
+        sum += balanced_accuracy(&p, &g, n_classes);
+    }
+    sum / nfam
+}
+
 fn mean_nll(rows: &[(Vec<f64>, usize)], temperature: f64) -> Result<f64> {
     let mut total = 0.0;
     for (logits, gold) in rows {
@@ -174,5 +292,28 @@ mod tests {
         let pred = vec![0, 1, 0, 1];
         let gold = vec![0, 1, 0, 1];
         assert!((balanced_accuracy(&pred, &gold, 2) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn oof_runs_on_synthetic() {
+        let mut rows = Vec::new();
+        for i in 0..20 {
+            let gold = i % 2;
+            rows.push((vec![3.0, 0.2], gold));
+        }
+        let o = fit_temperature_oof(&rows, 5).unwrap();
+        assert!(o.mean_temperature.is_finite());
+        assert!(o.ece_t1_oof.is_finite());
+        assert!(o.ece_calibrated_oof.is_finite());
+        assert_eq!(o.fold_temperatures.len(), 5);
+    }
+
+    #[test]
+    fn family_ba_averages_groups() {
+        let fam = vec!["a".into(), "a".into(), "b".into(), "b".into()];
+        let pred = vec![0, 0, 1, 0];
+        let gold = vec![0, 1, 1, 1];
+        let v = mean_family_balanced_accuracy(&fam, &pred, &gold, 2);
+        assert!(v > 0.0 && v < 1.0);
     }
 }

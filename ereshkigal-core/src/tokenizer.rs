@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::prompt::{digest, render_prompt, state_prefix_text};
+use crate::prompt::digest;
 use crate::types::{DecisionRow, EncodedDecision, LETTERS};
 use hf_hub::api::sync::ApiBuilder;
 use std::path::{Path, PathBuf};
@@ -51,7 +51,16 @@ impl ReferenceTokenizer {
     }
 
     pub fn encode_decision(&self, row: &DecisionRow, max_tokens: usize) -> Result<EncodedDecision> {
-        let prompt = render_prompt(row)?;
+        self.encode_decision_version(row, max_tokens, crate::types::PROMPT_VERSION)
+    }
+
+    pub fn encode_decision_version(
+        &self,
+        row: &DecisionRow,
+        max_tokens: usize,
+        prompt_version: &str,
+    ) -> Result<EncodedDecision> {
+        let prompt = crate::prompt::render_prompt_version(row, prompt_version)?;
         let ids = self.encode_ids(&prompt)?;
         if ids.is_empty() || ids.len() > max_tokens {
             return Err(Error::Validation(format!(
@@ -81,7 +90,11 @@ impl ReferenceTokenizer {
     }
 
     pub fn state_prefix_ids(&self, row: &DecisionRow) -> Result<Vec<i32>> {
-        let text = state_prefix_text(row)?;
+        self.state_prefix_ids_version(row, crate::types::PROMPT_VERSION)
+    }
+
+    pub fn state_prefix_ids_version(&self, row: &DecisionRow, prompt_version: &str) -> Result<Vec<i32>> {
+        let text = crate::prompt::state_prefix_text_version(row, prompt_version)?;
         let mut ids = self.encode_ids(&text)?;
         if ids.is_empty() {
             return Err(Error::Validation("empty state prefix".into()));

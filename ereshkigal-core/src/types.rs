@@ -3,6 +3,7 @@ use serde_json::Value;
 
 pub const LETTERS: &str = "ABCDEFGHIJKLMNOP";
 pub const PROMPT_VERSION: &str = "direct-options-v1";
+pub const PROMPT_VERSION_OUTLINE: &str = "state-outline-v1";
 pub const DIRECT_SYSTEM: &str = concat!(
     "Apply the supplied criterion to the supplied evidence. Choose exactly one listed option. ",
     "Respond with only its uppercase letter, with no explanation or reasoning."
@@ -80,6 +81,12 @@ pub struct ScoreResult {
     pub calibrated_probabilities: Option<Vec<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cascade_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_hit: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radix_prefix_tokens: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

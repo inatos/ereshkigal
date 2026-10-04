@@ -14,3 +14,6 @@ results/direct.jsonl
 results/serial.jsonl
 results/shared.jsonl
 results/bakeoff-*.jsonl
+results/ab_ereshkigal.jsonl
+results/shape_*.jsonl
+results/shape_bench.json

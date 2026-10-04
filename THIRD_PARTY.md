@@ -15,6 +15,13 @@ respective owners.
   `benchmarks/data/authored144.jsonl` (MIT) for accuracy bakeoffs and calibration.
 - `webgpu-demo/` is adapted from SemIf’s browser lab (MIT), including the vendored
   [wllama](https://github.com/ngxson/wllama) runtime under `webgpu-demo/vendor/wllama/`.
+- `fixtures/shape15.jsonl` is an original tiny shared-state bed (not SemIf shape777).
+
+## tree-sitter
+
+`state-outline-v1` uses [tree-sitter](https://tree-sitter.github.io/tree-sitter/) and
+[tree-sitter-json](https://github.com/tree-sitter/tree-sitter-json) (MIT).
+
 
 ## llama.cpp / llama-cpp-2
 
