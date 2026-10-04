@@ -1,0 +1,2 @@
+{"id":"pg-1","program":"release_gate","state":"Health checks passed in all zones after deploy.","expect":"ship"}
+{"id":"pg-2","program":"release_gate","state":"Rollback was initiated after failing canaries.","expect":"hold"}

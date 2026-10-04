@@ -1,15 +1,19 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const LETTERS: &str = "ABCDEFGHIJKLMNOP";
 pub const PROMPT_VERSION: &str = "direct-options-v1";
 pub const PROMPT_VERSION_OUTLINE: &str = "state-outline-v1";
+pub const PROMPT_VERSION_OPTIONS_FIRST: &str = "options-first-v1";
+pub const PROMPT_VERSION_PROBE_DECREE: &str = "probe-decree-v1";
+pub const PROMPT_VERSION_PROBE_STATE: &str = "probe-state-v1";
 pub const DIRECT_SYSTEM: &str = concat!(
     "Apply the supplied criterion to the supplied evidence. Choose exactly one listed option. ",
     "Respond with only its uppercase letter, with no explanation or reasoning."
 );
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct OptionSpec {
     pub id: String,
     pub description: String,

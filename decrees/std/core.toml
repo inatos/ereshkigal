@@ -1,0 +1,81 @@
+schema = "ereshkigal.decree/v1"
+recipe = "direct-options-v1"
+
+[decrees.evidence_yn]
+question = "Is there evidence that the claim is supported?"
+kind = "enum"
+options = [
+  { id = "yes", description = "The evidence supports the claim." },
+  { id = "no", description = "The evidence does not support the claim." },
+  { id = "insufficient", description = "The evidence is insufficient to decide." },
+]
+abstain = { coverage = 0.8 }
+on_abstain = "return"
+
+[[decrees.evidence_yn.tests]]
+state = "The deployment completed at 14:02 UTC. Health checks passed in all three zones."
+expect = "yes"
+group = "std-evidence-1"
+split = "dev"
+
+[[decrees.evidence_yn.tests]]
+state = "No logs are available for the change window."
+expect = "insufficient"
+group = "std-evidence-1"
+split = "dev"
+
+[decrees.route_queue]
+question = "Which queue should handle this request?"
+options = [
+  { id = "account_access", description = "Account access and authentication support." },
+  { id = "billing", description = "Billing and payment support." },
+  { id = "sales", description = "Sales and product evaluation." },
+]
+
+[[decrees.route_queue.tests]]
+state = "Customer asks to reset a forgotten password."
+expect = "account_access"
+split = "dev"
+group = "std-route-1"
+
+[decrees.severity]
+question = "How severe is the incident?"
+kind = "ordinal"
+options = [
+  { id = "sev1", description = "SEV1: complete outage." },
+  { id = "sev2", description = "SEV2: major degradation." },
+  { id = "sev3", description = "SEV3: minor impact." },
+  { id = "sev4", description = "SEV4: cosmetic." },
+  { id = "sev5", description = "SEV5: no user impact." },
+]
+
+[[decrees.severity.tests]]
+state = "All production regions are unreachable."
+expect = "sev1"
+split = "dev"
+group = "std-sev-1"
+
+[decrees.policy_applies]
+question = "Does the request require an approved change ticket under the stated policy?"
+options = [
+  { id = "required", description = "An approved change ticket is required." },
+  { id = "not_required", description = "An approved change ticket is not required." },
+  { id = "insufficient", description = "The evidence is insufficient to decide." },
+]
+
+[[decrees.policy_applies.tests]]
+state = "Policy: production deletion requires a ticket. Request: list backup file names; do not modify."
+expect = "not_required"
+split = "dev"
+group = "std-pol-1"
+
+[programs.release_gate]
+nodes = [
+  { id = "ok", decree = "evidence_yn" },
+  { id = "ticket", decree = "policy_applies", with = ["ok"], when = { node = "ok", is = "yes" } },
+]
+result = [
+  { when = ["yes"], then = "ship" },
+  { when = ["no"], then = "hold" },
+  { when = ["insufficient"], then = "page" },
+]

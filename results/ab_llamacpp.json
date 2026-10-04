@@ -1,8 +1,20 @@
 {
   "n": 3,
-  "argmax_agree": null,
-  "note": "Python SemIf not run (SEMIF_SCORE unset)",
-  "mean_ereshkigal_s": 0.5794140183333333,
-  "gguf": "Qwen3-0.6B-Q8_0.gguf",
-  "claim": "Proposed until SEMIF_SCORE is provided"
+  "argmax_agree": 1.0,
+  "argmax_agree_n": 3,
+  "max_abs_dp": 2.220446049250313e-16,
+  "prompt_sha_agree": 1.0,
+  "mean_ereshkigal_s": 0.609040605,
+  "mean_semif_s": 0.5517317709939865,
+  "gguf": "models/Qwen3-0.6B-Q8_0.gguf",
+  "gguf_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+  "model": "Qwen/Qwen3-0.6B",
+  "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+  "llama_cpp_2": "0.1.158",
+  "llama_cpp_python": "0.3.35",
+  "threads": 8,
+  "n_gpu_layers": 0,
+  "gate_max_abs_dp": 1e-06,
+  "stamp": "20261004T151719Z",
+  "claim": "Measured same-GGUF llamacpp A/B"
 }

@@ -1,0 +1,7 @@
+{
+  "n": 15,
+  "direct_sum_total_s": 2.396772273,
+  "shared_rows": 15,
+  "gpu_layers": 99,
+  "note": "CPU appendix unless N_GPU_LAYERS>0. shape777: download SemIf fixture separately."
+}

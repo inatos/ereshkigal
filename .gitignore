@@ -7,6 +7,16 @@ models/
 *.gguf.sha256
 .env
 .venv/
+**/.venv/
+.venv-semif/
+node_modules/
+**/node_modules/
+vendor/SemIf-OpenJev/
+vendor/vulkan-headers/
+vendor/SPIRV-Headers/
+vendor/spirv-prefix/
+target-vulkan/
+target-vulkan2/
 __pycache__/
 results/raw/
 results/*.local.*

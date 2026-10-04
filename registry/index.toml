@@ -1,0 +1,11 @@
+# first-party package index
+[[packages]]
+name = "std"
+version = "0.1.0"
+source = { path = "decrees/std" }
+
+[[packages]]
+name = "qwen3-0.6b-lora"
+version = "0.1.0"
+source = { path = "packs/qwen3-0.6b-lora" }
+note = "Adapter files produced by training/train_lora.py; sha-pin after training."

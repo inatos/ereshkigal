@@ -1,0 +1,22 @@
+{
+  "name": "ereshkigal",
+  "displayName": "Ereshkigal",
+  "description": "Ereshkigal .esk language support",
+  "version": "0.1.0",
+  "publisher": "inatos",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [{
+      "id": "ereshkigal",
+      "aliases": ["Ereshkigal", "esk"],
+      "extensions": [".esk"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "ereshkigal",
+      "scopeName": "source.ereshkigal",
+      "path": "./syntaxes/ereshkigal.tmLanguage.json"
+    }]
+  }
+}

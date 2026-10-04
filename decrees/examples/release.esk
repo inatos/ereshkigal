@@ -1,0 +1,18 @@
+recipe direct-options-v1
+
+decree deploy_ok "Is there evidence that the deployment succeeded?" {
+  yes "The deployment succeeded."
+  no "The deployment did not succeed."
+  insufficient "The evidence is insufficient to decide."
+  abstain coverage 0.8 => return
+  test dev group "deploy-1" "Deployment completed at 14:02 UTC. Health checks passed." => yes
+}
+
+program example_release_gate(evidence) {
+  let ok = deploy_ok(evidence)
+  match ok {
+    yes => "ship"
+    no => "hold"
+    insufficient => "page"
+  }
+}

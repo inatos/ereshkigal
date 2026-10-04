@@ -1,0 +1,8 @@
+[package]
+name = "ereshkigal-workspace"
+version = "0.1.0"
+license = "MIT"
+description = "Root package for the Ereshkigal decision language"
+
+[dependencies]
+std = { path = "decrees/std" }

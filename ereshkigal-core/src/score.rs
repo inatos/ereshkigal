@@ -64,7 +64,15 @@ impl Scorer {
             )));
         }
         let _ = letter_gbnf(row.options.len())?;
-        slots_match_letters(&enc.slots, &enc.slots)?;
+        let mut letter_ids = Vec::with_capacity(enc.slots.len());
+        for letter in crate::types::LETTERS.chars().take(enc.slots.len()) {
+            let with = self.engine.gguf_tokenize(&format!("{}{letter}", enc.prompt))?;
+            let last = with.last().copied().ok_or_else(|| {
+                Error::Validation(format!("GGUF produced no token for letter {letter}"))
+            })?;
+            letter_ids.push(last);
+        }
+        slots_match_letters(&enc.slots, &letter_ids)?;
         Ok(enc)
     }
 

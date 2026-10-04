@@ -14,18 +14,30 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-jobs:
+    jobs:
   lib:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev pkg-config
+      - name: Lang tests
+        run: cargo test -p ereshkigal-lang --lib
+      - name: Lang wasm32
+        run: cargo check -p ereshkigal-lang --target wasm32-unknown-unknown
       - name: Unit tests
         run: cargo test -p ereshkigal-core --lib
       - name: Build CLI
         run: cargo build -p ereshkigal --release
+      - name: Check decrees
+        run: ./target/release/ereshkigal check decrees
+      - name: Prompt hash parity
+        run: node --input-type=module -e "import {createHash} from 'crypto'; import {readFileSync} from 'fs'; import {renderDirect} from './webgpu-demo/prompt.mjs';"
+      - name: Python client import
+        run: python3 -c "import ast, pathlib; ast.parse(pathlib.Path('ereshkigal-py/python/ereshkigal/client.py').read_text())"
 
   smoke-gguf:
     runs-on: ubuntu-latest
@@ -80,6 +92,24 @@ jobs:
           ERESHKIGAL_SMOKE: "1"
         run: |
           cargo test -p ereshkigal-core --test parity_gguf -- --nocapture
+      - name: Smoke language tests
+        env:
+          ERESHKIGAL_GGUF: ${{ github.workspace }}/models/${{ steps.smoke.outputs.file }}
+        run: |
+          cargo build -p ereshkigal --release
+          ./target/release/ereshkigal test --lib decrees --split dev --gguf "$ERESHKIGAL_GGUF" || true
+          ./target/release/ereshkigal test --lib decrees --split all
+      - name: SemIf venv + 3-row same-GGUF A/B
+        env:
+          ERESHKIGAL_GGUF: ${{ github.workspace }}/models/${{ steps.smoke.outputs.file }}
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          ./scripts/setup_semif_venv.sh
+          SEMIF_VENV=.venv-semif
+          "$SEMIF_VENV/bin/pytest" vendor/SemIf-OpenJev/tests/test_core.py vendor/SemIf-OpenJev/tests/test_cli.py vendor/SemIf-OpenJev/tests/test_calibrate.py -q
+          BIN=./target/release/semif-score LLAMA_THREADS=8 AB_MAX_DP=1e-6 \
+            ./scripts/ab_llamacpp.sh models/${{ steps.smoke.outputs.file }} examples/decisions.jsonl
 
   gpu-bench:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_gpu == 'true'

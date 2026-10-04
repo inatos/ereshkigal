@@ -2,18 +2,19 @@
 
 Inspiration, not Betwixt-adopted Figments. Claims below are **Measured** in-repo or **Proposed** until a GPU/Python A/B exists.
 
-## Letter-slot cascade (Leviathan-style, no decode)
+## Letter-slot cascade (conformal default)
 
-0.6B Q8 drafts option logits. If top-1 − top-2 softmax margin `> tau`, commit; else a 4B GGUF verifies.
+0.6B Q8 drafts option logits. **Default:** commit iff the split-conformal set has size 1 (`--routing conformal --alpha 0.1`); else a 4B GGUF verifies. `--routing margin --tau …` is debug-only (raw softmax margin).
 
 ```bash
-semif-score --gguf models/Qwen3-0.6B-Q8_0.gguf --input fixtures/authored144.jsonl \
-  --output /tmp/draft.jsonl --model Qwen/Qwen3-0.6B --revision c1899de289a04d12100db370d81485cdf75e47ca
-semif-score cascade --input fixtures/authored144.jsonl --draft /tmp/draft.jsonl \
-  --output /tmp/cascade.jsonl --tau 0.8 --verify-gguf models/Qwen3.5-4B-Q4_K_M.gguf
+semif-score cascade --input fixtures/authored144.jsonl \
+  --draft results/bakeoff-qwen3-0.6b-q8-authored144.jsonl \
+  --verify-predictions results/bakeoff-unsloth-qwen35-4b-q4km-authored144.jsonl \
+  --output results/cascade_conformal.jsonl \
+  --gold fixtures/authored144.jsonl --routing conformal --alpha 0.1
 ```
 
-**Measured (2026-10-04, CPU):** Qwen3-0.6B Q8_0 authored144 probability margins are heavy-tailed (p50 ≈ 0.998). At `tau=0.35` about **93%** of rows would skip verify. That is a latency win and a quality risk — 0.6B family BA is ~0.52 vs unsloth 4B ~0.85. Tune `tau` upward (0.9–0.99) if you care about BA.
+**Measured (2026-10-04):** margin `tau=0.35` skipped **93%** at family BA **0.529**. Conformal `|C|=1` skipped **14%** at family BA **0.811** (4B-only 0.854). 0.6B max-prob is not a skip signal.
 
 ## State outline (`state-outline-v1`)
 
@@ -34,7 +35,11 @@ Disable with `--no-radix` / `--no-replay`.
 
 ## GBNF letter check
 
-`letter_gbnf(n)` emits `root ::= "A" | ...`. Slot IDs must match unique letter terminals before scoring.
+`letter_gbnf(n)` emits `root ::= "A" | ...`. Before scoring, gathered slots are compared to **GGUF-tokenized prompt+letter boundary tokens** (`slots_match_letters(enc.slots, gguf_letter_ids)`). A self-comparison of `enc.slots` against itself is not a check.
+
+## Decision language (2026-10-04)
+
+Named decrees, `.esk` parser/formatter, program graphs, abstain, pairwise ranking, conformal sets, probes, LoRA pack loading, package manifests: see `docs/LANGUAGE.md`. `direct-options-v1` hashes unchanged (Measured: JS `webgpu-demo/prompt.mjs` matches `expected_direct.jsonl`).
 
 ## Figments / papers
 

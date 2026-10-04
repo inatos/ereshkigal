@@ -1,0 +1,20 @@
+{
+  "n": 144,
+  "argmax_agree": 0.9444444444444444,
+  "argmax_agree_n": 136,
+  "max_abs_dp": 0.21604974952494188,
+  "prompt_sha_agree": 1.0,
+  "mean_ereshkigal_s": 3.610753155020833,
+  "mean_semif_s": 3.593160342875611,
+  "gguf": "models/Qwen3.5-4B-Q4_K_M.gguf",
+  "gguf_sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+  "model": "Qwen/Qwen3.5-4B",
+  "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+  "llama_cpp_2": "0.1.158",
+  "llama_cpp_python": "0.3.35",
+  "threads": 8,
+  "n_gpu_layers": 0,
+  "gate_max_abs_dp": 0.01,
+  "stamp": "20261004T142758Z",
+  "claim": "Measured same-GGUF llamacpp A/B"
+}

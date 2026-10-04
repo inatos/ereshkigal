@@ -1,0 +1,22 @@
+[package]
+name = "ereshkigal-lang"
+description = "Pure decision-language front end: prompts, decrees, .esk parser, metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+hex.workspace = true
+logos = "0.15"
+schemars = { version = "0.8", features = ["preserve_order"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+toml = { version = "0.8", features = ["preserve_order"] }
+
+[dev-dependencies]
+serde_json.workspace = true

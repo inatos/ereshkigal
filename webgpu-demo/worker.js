@@ -2,6 +2,7 @@ const browserFetch = self.fetch.bind(self);
 self.fetch = (input, init = {}) => browserFetch(input, { ...init, referrerPolicy: "no-referrer" });
 
 const { Wllama, LoggerWithoutDebug } = await import("./vendor/wllama/index.js");
+const { renderDirect, sha256Hex } = await import("./prompt.mjs");
 
 const MODELS = {
   "qwen3-0.6b": {
@@ -136,8 +137,10 @@ async function directScore(data) {
   const started = performance.now();
   const labels = labelsFor(data.options.length);
   const grammar = `root ::= ${labels.map((label) => `"${label}"`).join(" | ")}`;
-  const response = await engine.createChatCompletion({
-    messages: messagesFor(data, "direct"),
+  const prompt = renderDirect(data.state, data.question, data.options);
+  const promptSha = await sha256Hex(prompt);
+  const response = await engine.createCompletion({
+    prompt,
     max_tokens: 1,
     temperature: 1,
     top_k: 0,
@@ -147,7 +150,6 @@ async function directScore(data) {
     logit_bias: Object.fromEntries(labels.map((label, index) => [String(MODELS[modelId].labelBase + index), 100])),
     grammar,
     cache_prompt: false,
-    chat_template_kwargs: { enable_thinking: false },
   });
   const logits = optionLogprobs(response, labels);
   validateOptionLogprobs(logits, labels);
@@ -156,6 +158,7 @@ async function directScore(data) {
     totalMs: performance.now() - started,
     inputTokens: response.usage?.prompt_tokens ?? 0,
     readouts: 1,
+    promptSha256: promptSha,
     options: data.options.map((description, index) => ({
       label: labels[index], description, probability: probabilities[index], logit: logits[index],
     })),

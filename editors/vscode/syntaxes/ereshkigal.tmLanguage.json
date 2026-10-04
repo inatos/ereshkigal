@@ -1,0 +1,9 @@
+{
+  "scopeName": "source.ereshkigal",
+  "patterns": [
+    { "name": "comment.line.double-slash.ereshkigal", "match": "//.*$" },
+    { "name": "keyword.control.ereshkigal", "match": "\\b(recipe|decree|program|let|match|abstain|test|filter|sort|pairwise|return|escalate)\\b" },
+    { "name": "string.quoted.double.ereshkigal", "begin": "\"", "end": "\"", "patterns": [{ "name": "constant.character.escape.ereshkigal", "match": "\\\\." }] },
+    { "name": "variable.other.ereshkigal", "match": "\\b[A-Za-z_][A-Za-z0-9_-]*\\b" }
+  ]
+}

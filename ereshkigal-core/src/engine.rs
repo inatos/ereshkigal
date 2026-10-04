@@ -25,6 +25,8 @@ pub struct EngineConfig {
     pub threads: i32,
     pub n_gpu_layers: u32,
     pub n_seq_max: u32,
+    pub embeddings: bool,
+    pub adapter: Option<PathBuf>,
 }
 
 /// Process-scoped llama.cpp scorer. The model is leaked for a `'static` context lifetime
@@ -69,11 +71,21 @@ impl EngineOwned {
             .with_n_ctx(NonZeroU32::new(ctx_tokens))
             .with_n_threads(cfg.threads)
             .with_n_threads_batch(cfg.threads)
-            .with_n_seq_max(n_seq_max);
+            .with_n_seq_max(n_seq_max)
+            .with_embeddings(cfg.embeddings);
 
-        let ctx = model
+        let mut ctx = model
             .new_context(&backend, ctx_params)
             .map_err(|e| Error::Engine(format!("create context: {e}")))?;
+
+        if let Some(adapter_path) = &cfg.adapter {
+            let mut adapter = model
+                .lora_adapter_init(adapter_path)
+                .map_err(|e| Error::Engine(format!("lora_adapter_init: {e}")))?;
+            ctx.lora_adapter_set(&mut adapter, 1.0)
+                .map_err(|e| Error::Engine(format!("lora_adapter_set: {e}")))?;
+            Box::leak(Box::new(adapter));
+        }
 
         verify_vocab_agreement(&tokenizer, model)?;
 
@@ -209,6 +221,39 @@ impl EngineOwned {
     pub fn gguf_tokenize(&self, text: &str) -> Result<Vec<i32>> {
         let tokens = self.model.vocab().tokenize(text.as_bytes(), false, true);
         Ok(tokens.into_iter().map(|t| t.0).collect())
+    }
+
+    pub fn last_embedding(&self) -> Result<Vec<f32>> {
+        self.ctx
+            .embeddings_ith(-1)
+            .or_else(|_| self.ctx.embeddings_ith(0))
+            .map(|s| s.to_vec())
+            .map_err(|e| Error::Engine(format!("embeddings: {e}")))
+    }
+
+    pub fn gguf_chat_template(&self) -> Result<String> {
+        let t = self
+            .model
+            .chat_template(None)
+            .map_err(|e| Error::Engine(format!("chat_template: {e}")))?;
+        Ok(t.as_c_str().to_string_lossy().into_owned())
+    }
+
+    pub fn render_minijinja(&self, template: &str, messages: &[(String, String)]) -> Result<String> {
+        let env = minijinja::Environment::new();
+        let tmpl = env
+            .template_from_str(template)
+            .map_err(|e| Error::Engine(format!("minijinja parse: {e}")))?;
+        let msgs: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|(r, c)| serde_json::json!({"role": r, "content": c}))
+            .collect();
+        tmpl.render(serde_json::json!({
+            "messages": msgs,
+            "add_generation_prompt": true,
+            "enable_thinking": false,
+        }))
+            .map_err(|e| Error::Engine(format!("minijinja render: {e}")))
     }
 
     fn decode_logits_seq(&mut self, tokens: &[i32], start: i32, seq: i32) -> Result<Vec<f32>> {

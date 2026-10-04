@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ereshkigal_core::{
-    apply_temperature, cascade_select, decision_argmax, ece, fit_temperature, fit_temperature_oof,
-    top2_margin, DecisionRow, EngineConfig, EngineOwned, ScoreResult, Scorer,
+    apply_pride, apply_temperature, cascade_select, cascade_select_conformal, cycle_options,
+    decision_argmax, ece, fit_qhat, fit_temperature, fit_temperature_oof, permute_debias,
+    pride_frac_count, pride_log_prior, softmax, top2_margin, DecisionRow, EngineConfig,
+    EngineOwned, ScoreResult, Scorer,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -90,6 +92,27 @@ struct Cli {
     /// Optional temperature for calibrated_probabilities (argmax unchanged)
     #[arg(long, global = true)]
     temperature: Option<f64>,
+
+    /// Letter-prior correction after scoring
+    #[arg(long, value_enum, default_value_t = DebiasCli::None, global = true)]
+    debias: DebiasCli,
+
+    /// Fraction of rows used to estimate PriDe letter prior (cyclic perms)
+    #[arg(long, default_value_t = 0.05, global = true)]
+    pride_frac: f64,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum DebiasCli {
+    None,
+    Pride,
+    Permute,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum CascadeRouting {
+    Conformal,
+    Margin,
 }
 
 #[derive(Subcommand, Debug)]
@@ -128,15 +151,30 @@ enum Commands {
         /// Output JSONL
         #[arg(long)]
         output: PathBuf,
-        /// Commit draft when top-1 − top-2 > tau
+        /// Commit draft when top-1 − top-2 > tau (only with --routing margin)
         #[arg(long, default_value_t = 0.35)]
         tau: f64,
-        /// Verify GGUF for low-margin rows (required unless --draft-only)
+        /// Verify GGUF for deferred rows (required unless --draft-only or --verify-predictions)
         #[arg(long)]
         verify_gguf: Option<PathBuf>,
-        /// Skip verify (measure skip rate only; low-margin rows keep draft)
+        /// Existing verify JSONL (same ids) — skip a second GGUF load
+        #[arg(long)]
+        verify_predictions: Option<PathBuf>,
+        /// Skip verify (measure skip rate only; deferred rows keep draft)
         #[arg(long)]
         draft_only: bool,
+        /// Default conformal: accept draft iff |C|=1. `margin` is the tau debug path.
+        #[arg(long, value_enum, default_value_t = CascadeRouting::Conformal)]
+        routing: CascadeRouting,
+        /// Conformal miscoverage (split THR scores)
+        #[arg(long, default_value_t = 0.1)]
+        alpha: f64,
+        /// Pre-fit q-hat (skips --gold)
+        #[arg(long)]
+        qhat: Option<f64>,
+        /// Gold JSONL with integer `label` to fit q-hat
+        #[arg(long)]
+        gold: Option<PathBuf>,
     },
 }
 
@@ -164,7 +202,12 @@ fn main() -> Result<()> {
             output,
             tau,
             verify_gguf,
+            verify_predictions,
             draft_only,
+            routing,
+            alpha,
+            qhat,
+            gold,
         }) => run_cascade(
             EngineConfig {
                 gguf: verify_gguf
@@ -177,14 +220,21 @@ fn main() -> Result<()> {
                 threads: cli.llama_threads.unwrap_or(4),
                 n_gpu_layers: cli.n_gpu_layers,
                 n_seq_max: cli.n_seq_max,
+                embeddings: false,
+                adapter: None,
             },
             cli.prompt_version.clone(),
             draft_only,
             verify_gguf.or(cli.gguf.clone()),
+            verify_predictions,
             input,
             draft,
             output,
             tau,
+            routing,
+            alpha,
+            qhat,
+            gold,
         ),
         Some(Commands::Score) | None => run_score(cli),
     }
@@ -211,6 +261,8 @@ fn run_score(cli: Cli) -> Result<()> {
         threads,
         n_gpu_layers: cli.n_gpu_layers,
         n_seq_max: cli.n_seq_max,
+        embeddings: false,
+        adapter: None,
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -231,6 +283,7 @@ fn run_score(cli: Cli) -> Result<()> {
     };
 
     let temp = cli.temperature;
+    let mut scored: Vec<ScoreResult> = Vec::with_capacity(rows.len());
     match cli.mode {
         Mode::Direct => {
             for row in &rows {
@@ -238,7 +291,7 @@ fn run_score(cli: Cli) -> Result<()> {
                     .score_direct(row)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 apply_temp_fields(&mut result, temp)?;
-                write_result(&mut out, &result)?;
+                scored.push(result);
             }
         }
         Mode::Serial => {
@@ -247,7 +300,7 @@ fn run_score(cli: Cli) -> Result<()> {
                     .score_serial(row)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 apply_temp_fields(&mut result, temp)?;
-                write_result(&mut out, &result)?;
+                scored.push(result);
             }
         }
         Mode::Shared => {
@@ -262,10 +315,6 @@ fn run_score(cli: Cli) -> Result<()> {
                 let (results, timing) = scorer
                     .score_shared(batch)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                for mut result in results {
-                    apply_temp_fields(&mut result, temp)?;
-                    write_result(&mut out, &result)?;
-                }
                 eprintln!(
                     "shared batch size={} total_s={:.3} prefill_s={:.3} suffix_s={:.3}",
                     timing.batch_size,
@@ -273,12 +322,78 @@ fn run_score(cli: Cli) -> Result<()> {
                     timing.prefill_seconds,
                     timing.suffix_forward_seconds
                 );
+                for mut result in results {
+                    apply_temp_fields(&mut result, temp)?;
+                    scored.push(result);
+                }
                 i = j;
             }
         }
     }
+    apply_debias(&mut scorer, &rows, &mut scored, cli.debias, cli.pride_frac)?;
+    for result in &scored {
+        write_result(&mut out, result)?;
+    }
 
     Ok(())
+}
+
+fn apply_debias(
+    scorer: &mut Scorer,
+    rows: &[DecisionRow],
+    scored: &mut [ScoreResult],
+    mode: DebiasCli,
+    pride_frac: f64,
+) -> Result<()> {
+    match mode {
+        DebiasCli::None => Ok(()),
+        DebiasCli::Pride => {
+            let n_fit = pride_frac_count(rows.len(), pride_frac).max(1);
+            let mut letter_ps: Vec<Vec<f64>> = Vec::new();
+            for row in rows.iter().take(n_fit) {
+                let n = row.options.len().max(1);
+                for k in 0..n {
+                    if k == 0 {
+                        if let Some(r) = scored.iter().find(|s| s.id == row.id) {
+                            letter_ps.push(r.probabilities.clone());
+                            continue;
+                        }
+                    }
+                    let cyc = cycle_options(row, k);
+                    let r = scorer
+                        .score_direct(&cyc)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    letter_ps.push(r.probabilities);
+                }
+            }
+            let prior = pride_log_prior(&letter_ps).map_err(|e| anyhow::anyhow!("{e}"))?;
+            for r in scored.iter_mut() {
+                r.probabilities =
+                    apply_pride(&r.probabilities, &prior).map_err(|e| anyhow::anyhow!("{e}"))?;
+                r.probability_status =
+                    "PriDe letter-prior corrected (Zheng et al. ICLR 2024)".into();
+            }
+            eprintln!("PriDe prior={prior:?} fit_rows={n_fit}");
+            Ok(())
+        }
+        DebiasCli::Permute => {
+            for (row, r) in rows.iter().zip(scored.iter_mut()) {
+                let n = row.options.len();
+                let mut perms = Vec::with_capacity(n);
+                perms.push(r.option_logits.clone());
+                for k in 1..n {
+                    let cyc = cycle_options(row, k);
+                    let scored_k = scorer
+                        .score_direct(&cyc)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    perms.push(scored_k.option_logits);
+                }
+                r.probabilities = permute_debias(&perms).map_err(|e| anyhow::anyhow!("{e}"))?;
+                r.probability_status = "cyclic permutation-averaged option probabilities".into();
+            }
+            Ok(())
+        }
+    }
 }
 
 fn apply_temp_fields(result: &mut ScoreResult, temperature: Option<f64>) -> Result<()> {
@@ -394,10 +509,15 @@ fn run_cascade(
     prompt_version: String,
     draft_only: bool,
     verify_gguf: Option<PathBuf>,
+    verify_predictions: Option<PathBuf>,
     input: PathBuf,
     draft_path: PathBuf,
     output: PathBuf,
     tau: f64,
+    routing: CascadeRouting,
+    alpha: f64,
+    qhat: Option<f64>,
+    gold: Option<PathBuf>,
 ) -> Result<()> {
     let rows: Vec<DecisionRow> = read_jsonl(&input)?;
     let drafts: Vec<PredRow> = read_any_jsonl(&draft_path)?;
@@ -405,7 +525,17 @@ fn run_cascade(
     for d in &drafts {
         by_id.insert(d.id.clone(), d);
     }
-    let mut scorer = if draft_only {
+    let verify_by_id = if let Some(path) = &verify_predictions {
+        let v: Vec<PredRow> = read_any_jsonl(path)?;
+        let mut m = std::collections::HashMap::new();
+        for r in v {
+            m.insert(r.id.clone(), r);
+        }
+        Some(m)
+    } else {
+        None
+    };
+    let mut scorer = if draft_only || verify_by_id.is_some() {
         None
     } else {
         let gguf = verify_gguf
@@ -417,13 +547,46 @@ fn run_cascade(
                     Some(cfg.gguf.clone())
                 }
             })
-            .ok_or_else(|| anyhow::anyhow!("cascade needs --verify-gguf or --gguf"))?;
+            .ok_or_else(|| anyhow::anyhow!("cascade needs --verify-gguf, --gguf, or --verify-predictions"))?;
         let mut load = cfg;
         load.gguf = gguf;
         let (engine, tokenizer) = EngineOwned::load(load).map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut s = Scorer::new(engine, tokenizer);
         s.prompt_version = prompt_version;
         Some(s)
+    };
+    let qhat_val = match routing {
+        CascadeRouting::Margin => None,
+        CascadeRouting::Conformal => {
+            if let Some(q) = qhat {
+                Some(q)
+            } else {
+                let gold_path = gold.ok_or_else(|| {
+                    anyhow::anyhow!("conformal cascade needs --gold or --qhat")
+                })?;
+                let gold_rows: Vec<GoldRow> = read_any_jsonl(&gold_path)?;
+                let mut scores = Vec::new();
+                for g in &gold_rows {
+                    let d = by_id
+                        .get(&g.id)
+                        .ok_or_else(|| anyhow::anyhow!("missing draft for gold {}", g.id))?;
+                    let p = if d.probabilities.len() == d.option_logits.len()
+                        && !d.probabilities.is_empty()
+                    {
+                        d.probabilities.clone()
+                    } else {
+                        softmax(&d.option_logits).map_err(|e| anyhow::anyhow!("{e}"))?
+                    };
+                    if g.label >= p.len() {
+                        bail!("gold label OOB for {}", g.id);
+                    }
+                    scores.push(1.0 - p[g.label]);
+                }
+                let q = fit_qhat(&scores, alpha).map_err(|e| anyhow::anyhow!("{e}"))?;
+                eprintln!("fitted conformal qhat={q:.6} alpha={alpha} n={}", scores.len());
+                Some(q)
+            }
+        }
     };
     let mut out = File::create(&output)?;
     let mut n_draft = 0usize;
@@ -433,22 +596,69 @@ fn run_cascade(
         let draft = by_id
             .get(&row.id)
             .ok_or_else(|| anyhow::anyhow!("missing draft for {}", row.id))?;
-        let margin = top2_margin(&draft.option_logits).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let commit_draft = margin > tau;
-        let outcome = if commit_draft {
-            n_draft += 1;
-            cascade_select(&draft.option_logits, None, tau).map_err(|e| anyhow::anyhow!("{e}"))?
+        let need_verify = match routing {
+            CascadeRouting::Margin => {
+                top2_margin(&draft.option_logits).map_err(|e| anyhow::anyhow!("{e}"))? <= tau
+            }
+            CascadeRouting::Conformal => {
+                let q = qhat_val.unwrap();
+                let p = if draft.probabilities.is_empty() {
+                    softmax(&draft.option_logits).map_err(|e| anyhow::anyhow!("{e}"))?
+                } else {
+                    draft.probabilities.clone()
+                };
+                ereshkigal_core::option_set(&p, q).len() != 1
+            }
+        };
+        let verify_logits: Option<Vec<f64>> = if !need_verify {
+            None
+        } else if let Some(map) = &verify_by_id {
+            let v = map
+                .get(&row.id)
+                .ok_or_else(|| anyhow::anyhow!("missing verify prediction for {}", row.id))?;
+            Some(v.option_logits.clone())
         } else if let Some(s) = scorer.as_mut() {
-            n_verify += 1;
             let verified = s.score_direct(row).map_err(|e| anyhow::anyhow!("{e}"))?;
-            cascade_select(&draft.option_logits, Some(&verified.option_logits), tau)
-                .map_err(|e| anyhow::anyhow!("{e}"))?
+            Some(verified.option_logits)
         } else {
-            n_forced += 1;
-            let mut o = cascade_select(&draft.option_logits, None, 0.0)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            o.source = "cascade-draft-forced";
-            o
+            None
+        };
+        let outcome = match routing {
+            CascadeRouting::Margin => {
+                if !need_verify {
+                    n_draft += 1;
+                    cascade_select(&draft.option_logits, None, tau)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                } else if let Some(v) = verify_logits.as_deref() {
+                    n_verify += 1;
+                    cascade_select(&draft.option_logits, Some(v), tau)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                } else {
+                    n_forced += 1;
+                    let mut o = cascade_select(&draft.option_logits, None, 0.0)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    o.source = "cascade-draft-forced";
+                    o
+                }
+            }
+            CascadeRouting::Conformal => {
+                let q = qhat_val.unwrap();
+                if !need_verify {
+                    n_draft += 1;
+                    cascade_select_conformal(&draft.option_logits, None, q)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                } else if let Some(v) = verify_logits.as_deref() {
+                    n_verify += 1;
+                    cascade_select_conformal(&draft.option_logits, Some(v), q)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                } else {
+                    n_forced += 1;
+                    let mut o = cascade_select(&draft.option_logits, None, 0.0)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    o.source = "cascade-draft-forced";
+                    o
+                }
+            }
         };
         let v = json!({
             "id": row.id,
@@ -457,13 +667,17 @@ fn run_cascade(
             "cascade_source": outcome.source,
             "used_verify": outcome.used_verify,
             "draft_margin": outcome.draft_margin,
+            "set_size": outcome.set_size,
             "tau": tau,
+            "routing": format!("{routing:?}").to_lowercase(),
+            "qhat": qhat_val,
+            "alpha": alpha,
         });
         serde_json::to_writer(&mut out, &v)?;
         out.write_all(b"\n")?;
     }
     eprintln!(
-        "cascade tau={tau} draft_commit={n_draft} verify={n_verify} draft_forced={n_forced} total={}",
+        "cascade routing={routing:?} draft_commit={n_draft} verify={n_verify} draft_forced={n_forced} total={}",
         rows.len()
     );
     Ok(())

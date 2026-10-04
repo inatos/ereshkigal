@@ -5,6 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::softmax::{argmax, softmax};
+use ereshkigal_lang::conformal::option_set;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CascadeOutcome {
@@ -12,6 +13,7 @@ pub struct CascadeOutcome {
     pub used_verify: bool,
     pub draft_margin: f64,
     pub source: &'static str,
+    pub set_size: usize,
 }
 
 /// Top-1 minus top-2 probability from logits.
@@ -38,6 +40,7 @@ pub fn cascade_select(
             used_verify: false,
             draft_margin: margin,
             source: "cascade-draft",
+            set_size: 1,
         });
     }
     let verify = verify_logits.ok_or_else(|| {
@@ -53,6 +56,43 @@ pub fn cascade_select(
         used_verify: true,
         draft_margin: margin,
         source: "cascade-verify",
+        set_size: 0,
+    })
+}
+
+/// Commit draft iff conformal set is a singleton (`|C|=1`); else verify.
+/// `qhat` from [`crate::conformal::fit_qhat`] on `s_i = 1 - p_gold`.
+pub fn cascade_select_conformal(
+    draft_logits: &[f64],
+    verify_logits: Option<&[f64]>,
+    qhat: f64,
+) -> Result<CascadeOutcome> {
+    let margin = top2_margin(draft_logits)?;
+    let probs = softmax(draft_logits)?;
+    let set = option_set(&probs, qhat);
+    if set.len() == 1 {
+        return Ok(CascadeOutcome {
+            probabilities: probs,
+            used_verify: false,
+            draft_margin: margin,
+            source: "cascade-draft",
+            set_size: 1,
+        });
+    }
+    let verify = verify_logits.ok_or_else(|| {
+        Error::Validation("cascade requires verify logits when conformal set is not singleton".into())
+    })?;
+    if verify.len() != draft_logits.len() {
+        return Err(Error::Validation(
+            "draft and verify option counts differ".into(),
+        ));
+    }
+    Ok(CascadeOutcome {
+        probabilities: softmax(verify)?,
+        used_verify: true,
+        draft_margin: margin,
+        source: "cascade-verify",
+        set_size: set.len(),
     })
 }
 
@@ -84,5 +124,15 @@ mod tests {
         let out = cascade_select(&draft, Some(&verify), 0.5).unwrap();
         assert!(out.used_verify);
         assert_eq!(argmax(&out.probabilities), Some(1));
+    }
+
+    #[test]
+    fn conformal_singleton_skips_verify() {
+        let draft = vec![8.0, 0.0, 0.1];
+        let verify = vec![0.0, 8.0, 0.0];
+        let q = ereshkigal_lang::fit_qhat(&[0.05, 0.08, 0.1], 0.1).unwrap();
+        let out = cascade_select_conformal(&draft, Some(&verify), q).unwrap();
+        assert!(!out.used_verify);
+        assert_eq!(out.set_size, 1);
     }
 }

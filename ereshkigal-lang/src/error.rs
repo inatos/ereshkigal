@@ -8,6 +8,15 @@ pub enum Error {
     #[error("validation: {0}")]
     Validation(String),
 
+    #[error("parse: {0}")]
+    Parse(String),
+
+    #[error("type: {0}")]
+    Type(String),
+
+    #[error("lint: {0}")]
+    Lint(String),
+
     #[error("tokenizer: {0}")]
     Tokenizer(String),
 

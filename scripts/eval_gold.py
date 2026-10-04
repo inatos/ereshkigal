@@ -28,10 +28,16 @@ def main(gold_path, pred_path):
     acc=sum(a==b for a,b in zip(pred_i,gold_i))/len(pred_i)
     global_ba=ba(pred_i,gold_i,n)
     by=defaultdict(lambda: ([],[]))
-    for f,p,g in zip(fams,pred_i,gold_i):
+    groups=defaultdict(list)
+    for f,p,g,row in zip(fams,pred_i,gold_i,pred):
         by[f][0].append(p); by[f][1].append(g)
+        gid=gby[row['id']].get('group_id')
+        if gid:
+            groups[gid].append(p==g)
     fam_ba=sum(ba(ps,gs,n) for ps,gs in by.values())/len(by)
+    allc=sum(1 for hits in groups.values() if hits and all(hits))/len(groups) if groups else None
     out={"n":len(pred_i),"accuracy":acc,"global_ba":global_ba,"family_ba":fam_ba,
+         "group_all_correct":allc,
          "families":{k:ba(v[0],v[1],n) for k,v in by.items()}}
     print(json.dumps(out, indent=2))
 

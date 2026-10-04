@@ -74,12 +74,43 @@ pub struct OofCalib {
 }
 
 /// K-fold out-of-fold temperature fit (Guo-style). Fit T on train folds, score ECE on holdout.
+///
+/// When `groups` is `Some`, fold assignment is `hash(group_id) % k` so contrast-set
+/// members stay together. When `None`, falls back to `i % k` (legacy).
 pub fn fit_temperature_oof(rows: &[(Vec<f64>, usize)], folds: usize) -> Result<OofCalib> {
+    fit_temperature_oof_grouped(rows, None, folds)
+}
+
+fn fold_of(i: usize, group: Option<&str>, folds: usize) -> usize {
+    if let Some(g) = group {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in g.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        (h as usize) % folds
+    } else {
+        i % folds
+    }
+}
+
+pub fn fit_temperature_oof_grouped(
+    rows: &[(Vec<f64>, usize)],
+    groups: Option<&[String]>,
+    folds: usize,
+) -> Result<OofCalib> {
     let folds = folds.max(2);
     if rows.len() < folds {
         return Err(Error::Validation(
             "need at least as many labeled rows as OOF folds".into(),
         ));
+    }
+    if let Some(g) = groups {
+        if g.len() != rows.len() {
+            return Err(Error::Validation(
+                "group ids must match labeled row count".into(),
+            ));
+        }
     }
     let mut fold_temps = Vec::new();
     let mut holdout_raw: Vec<(Vec<f64>, usize)> = Vec::new();
@@ -88,13 +119,13 @@ pub fn fit_temperature_oof(rows: &[(Vec<f64>, usize)], folds: usize) -> Result<O
         let train: Vec<(Vec<f64>, usize)> = rows
             .iter()
             .enumerate()
-            .filter(|(i, _)| i % folds != f)
+            .filter(|(i, _)| fold_of(*i, groups.and_then(|g| g.get(*i)).map(|s| s.as_str()), folds) != f)
             .map(|(_, r)| r.clone())
             .collect();
         let test: Vec<(Vec<f64>, usize)> = rows
             .iter()
             .enumerate()
-            .filter(|(i, _)| i % folds == f)
+            .filter(|(i, _)| fold_of(*i, groups.and_then(|g| g.get(*i)).map(|s| s.as_str()), folds) == f)
             .map(|(_, r)| r.clone())
             .collect();
         if train.is_empty() || test.is_empty() {

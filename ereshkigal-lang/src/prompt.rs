@@ -60,6 +60,61 @@ pub fn direct_messages(row: &DecisionRow) -> Result<Vec<(String, String)>> {
     ])
 }
 
+fn option_array(row: &DecisionRow) -> Vec<Value> {
+    let mut options = Vec::with_capacity(row.options.len());
+    for (index, option) in row.options.iter().enumerate() {
+        let mut opt = serde_json::Map::new();
+        opt.insert(
+            "letter".into(),
+            Value::String(LETTERS.chars().nth(index).unwrap().to_string()),
+        );
+        opt.insert(
+            "description".into(),
+            Value::String(option.description.clone()),
+        );
+        options.push(Value::Object(opt));
+    }
+    options
+}
+
+/// Criterion + options before evidence so a shared prefix covers many items.
+pub fn options_first_messages(row: &DecisionRow) -> Result<Vec<(String, String)>> {
+    validate_row(row)?;
+    let mut payload = serde_json::Map::new();
+    payload.insert("criterion".into(), Value::String(row.question.clone()));
+    payload.insert("options".into(), Value::Array(option_array(row)));
+    payload.insert("evidence".into(), row.state.clone());
+    let user = dumps_pythonish(&Value::Object(payload))?;
+    Ok(vec![
+        ("system".into(), DIRECT_SYSTEM.to_string()),
+        ("user".into(), user),
+    ])
+}
+
+fn probe_state_messages(row: &DecisionRow) -> Result<Vec<(String, String)>> {
+    validate_row(row)?;
+    let mut payload = serde_json::Map::new();
+    payload.insert("evidence".into(), row.state.clone());
+    let user = dumps_pythonish(&Value::Object(payload))?;
+    Ok(vec![
+        (
+            "system".into(),
+            "Encode the supplied evidence. Do not answer.".into(),
+        ),
+        ("user".into(), user),
+    ])
+}
+
+fn simple_outline(state: &Value) -> String {
+    match state {
+        Value::String(s) => s.chars().take(2048).collect(),
+        other => {
+            let dumped = serde_json::to_string(other).unwrap_or_default();
+            dumped.chars().take(2048).collect()
+        }
+    }
+}
+
 /// Qwen3 chat template for system+user with `enable_thinking=false`.
 ///
 /// Matches transformers `apply_chat_template(..., add_generation_prompt=True, enable_thinking=False)`
@@ -85,11 +140,14 @@ pub fn render_prompt_version(row: &DecisionRow, version: &str) -> Result<String>
     let messages = match version {
         PROMPT_VERSION => direct_messages(row)?,
         crate::types::PROMPT_VERSION_OUTLINE => {
-            let outline = crate::outline::outline_state(&row.state)?;
+            let outline = simple_outline(&row.state);
             let mut clone = row.clone();
             clone.state = Value::String(format!("[state-outline-v1]\n{outline}"));
             direct_messages(&clone)?
         }
+        crate::types::PROMPT_VERSION_OPTIONS_FIRST => options_first_messages(row)?,
+        crate::types::PROMPT_VERSION_PROBE_DECREE => direct_messages(row)?,
+        crate::types::PROMPT_VERSION_PROBE_STATE => probe_state_messages(row)?,
         other => {
             return Err(Error::Validation(format!("unknown prompt_version {other}")));
         }
@@ -116,14 +174,28 @@ pub fn state_prefix_text_version(row: &DecisionRow, version: &str) -> Result<Str
     let prompt = render_prompt_version(row, version)?;
     let messages = match version {
         crate::types::PROMPT_VERSION_OUTLINE => {
-            let outline = crate::outline::outline_state(&row.state)?;
+            let outline = simple_outline(&row.state);
             let mut clone = row.clone();
             clone.state = Value::String(format!("[state-outline-v1]\n{outline}"));
             direct_messages(&clone)?
         }
+        crate::types::PROMPT_VERSION_OPTIONS_FIRST => options_first_messages(row)?,
+        crate::types::PROMPT_VERSION_PROBE_STATE => probe_state_messages(row)?,
         _ => direct_messages(row)?,
     };
     let payload = &messages[1].1;
+    let idx = prompt
+        .find(payload.as_str())
+        .ok_or_else(|| Error::msg("payload missing from prompt"))?;
+    if version == crate::types::PROMPT_VERSION_OPTIONS_FIRST {
+        let needle = ", \"evidence\": ";
+        let rel = payload
+            .find(needle)
+            .ok_or_else(|| Error::Validation("options-first payload missing evidence key".into()))?;
+        // Include up to and including `"evidence": ` so items share criterion+options.
+        let cut = rel + needle.len();
+        return Ok(format!("{}{}", &prompt[..idx], &payload[..cut]));
+    }
     let mut evidence_obj = serde_json::Map::new();
     evidence_obj.insert("evidence".into(), row.state.clone());
     let evidence = dumps_pythonish(&Value::Object(evidence_obj))?;
@@ -134,9 +206,6 @@ pub fn state_prefix_text_version(row: &DecisionRow, version: &str) -> Result<Str
             "Cannot establish a deterministic evidence prefix".into(),
         ));
     }
-    let idx = prompt
-        .find(payload.as_str())
-        .ok_or_else(|| Error::msg("payload missing from prompt"))?;
     Ok(format!("{}{}", &prompt[..idx], evidence))
 }
 
@@ -261,5 +330,23 @@ mod tests {
             .unwrap();
         assert_ne!(digest(&outline), v1);
         assert!(outline.contains("[state-outline-v1]"));
+    }
+
+    #[test]
+    fn options_first_differs_and_prefixes_before_evidence() {
+        let v1 = digest(&render_prompt(&support_row()).unwrap());
+        let first = render_prompt_version(
+            &support_row(),
+            crate::types::PROMPT_VERSION_OPTIONS_FIRST,
+        )
+        .unwrap();
+        assert_ne!(digest(&first), v1);
+        let prefix =
+            state_prefix_text_version(&support_row(), crate::types::PROMPT_VERSION_OPTIONS_FIRST)
+                .unwrap();
+        assert!(prefix.contains("\"criterion\""));
+        assert!(prefix.contains("\"options\""));
+        assert!(prefix.ends_with("\"evidence\": ") || prefix.contains("\"evidence\": "));
+        assert!(!prefix.contains("14:02 UTC"));
     }
 }

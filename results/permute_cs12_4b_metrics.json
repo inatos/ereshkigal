@@ -1,0 +1,10 @@
+{
+  "n": 12,
+  "accuracy": 0.9166666666666666,
+  "global_ba": 0.8888888888888888,
+  "family_ba": 0.8888888888888888,
+  "group_all_correct": 0.6666666666666666,
+  "families": {
+    "candidate_selection": 0.8888888888888888
+  }
+}
