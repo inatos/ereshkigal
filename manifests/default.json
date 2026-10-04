@@ -1,0 +1,37 @@
+{
+  "prompt_version": "direct-options-v1",
+  "tokenizer": {
+    "source": "Qwen/Qwen3.5-4B",
+    "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "chat_template": "qwen3_system_user_thinking_off"
+  },
+  "gguf": {
+    "repo": "unsloth/Qwen3.5-4B-GGUF",
+    "file": "Qwen3.5-4B-Q4_K_M.gguf",
+    "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+    "notes": "Pinned after local bakeoff on examples/decisions.jsonl (unsloth Q4_K_M). Re-run scripts/bakeoff.sh to challenge.",
+    "bytes": 2740937888
+  },
+  "bakeoff_candidates": [
+    {
+      "id": "unsloth-qwen35-4b-q4km",
+      "repo": "unsloth/Qwen3.5-4B-GGUF",
+      "file": "Qwen3.5-4B-Q4_K_M.gguf"
+    },
+    {
+      "id": "bartowski-qwen35-4b-q4km",
+      "repo": "bartowski/Qwen_Qwen3.5-4B-GGUF",
+      "file": "Qwen_Qwen3.5-4B-Q4_K_M.gguf"
+    }
+  ],
+  "serving": {
+    "modes": [
+      "direct",
+      "serial",
+      "shared"
+    ],
+    "backend": "llamacpp",
+    "max_prompt_tokens": 4096,
+    "decode_chunk": 512
+  }
+}

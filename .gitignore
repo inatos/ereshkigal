@@ -1,0 +1,16 @@
+/target/
+**/*.rs.bk
+.DS_Store
+.cache/
+models/
+*.gguf
+*.gguf.sha256
+.env
+.venv/
+__pycache__/
+results/raw/
+results/*.local.*
+results/direct.jsonl
+results/serial.jsonl
+results/shared.jsonl
+results/bakeoff-*.jsonl
