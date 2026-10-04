@@ -34,7 +34,17 @@ fn path(rel: &str) -> PathBuf {
 }
 
 fn gguf_path() -> Option<PathBuf> {
-    std::env::var_os("ERESHKIGAL_GGUF").map(PathBuf::from)
+    let raw = PathBuf::from(std::env::var_os("ERESHKIGAL_GGUF")?);
+    if raw.is_absolute() {
+        Some(raw)
+    } else {
+        let from_root = repo_root().join(&raw);
+        if from_root.is_file() {
+            Some(from_root)
+        } else {
+            Some(raw)
+        }
+    }
 }
 
 fn smoke_mode() -> bool {

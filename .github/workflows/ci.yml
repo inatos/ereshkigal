@@ -71,7 +71,7 @@ jobs:
           echo "${{ steps.smoke.outputs.sha }}  models/${{ steps.smoke.outputs.file }}" | sha256sum -c -
       - name: Smoke parity test
         env:
-          ERESHKIGAL_GGUF: models/${{ steps.smoke.outputs.file }}
+          ERESHKIGAL_GGUF: ${{ github.workspace }}/models/${{ steps.smoke.outputs.file }}
           ERESHKIGAL_SMOKE: "1"
         run: |
           cargo test -p ereshkigal-core --test parity_gguf -- --nocapture
