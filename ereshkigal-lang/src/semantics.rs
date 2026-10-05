@@ -132,4 +132,28 @@ mod tests {
         let st = status_for(&d(), &[0.51, 0.49], None);
         assert_eq!(st, DecideStatus::Abstain);
     }
+
+    #[test]
+    fn chaining_skips_when_prior_abstained() {
+        let mut facts = BTreeMap::new();
+        let probs = BTreeMap::new();
+        let g = Guard::Is {
+            node: "gate".into(),
+            is: "yes".into(),
+        };
+        assert!(!eval_guard(&g, &facts, &probs));
+        facts.insert("gate".into(), "yes".into());
+        assert!(eval_guard(&g, &facts, &probs));
+        let (st, idx) = apply_on_abstain(&d(), DecideStatus::Abstain, Some(0));
+        assert_eq!(st, DecideStatus::Abstain);
+        assert!(idx.is_none());
+    }
+
+    #[test]
+    fn conformal_maybe_set_is_first_class() {
+        let set = crate::option_set(&[0.92, 0.05, 0.03], 0.1);
+        assert_eq!(set, vec![0]);
+        let wide = crate::option_set(&[0.4, 0.35, 0.25], 0.7);
+        assert!(wide.len() >= 2);
+    }
 }

@@ -1,0 +1,133 @@
+{
+  "gold": "/home/inatos/Documents/_Projects/Betwixt/betwixt_engine/tools/ereshkigal/fixtures/dev_gold.jsonl",
+  "n_dev": 20,
+  "families": {
+    "contrast": {
+      "winner": "identity",
+      "nll": [
+        {
+          "id": "identity",
+          "mean_nll": 1.3862943611198906
+        },
+        {
+          "id": "short",
+          "mean_nll": 1.3862943611198906
+        },
+        {
+          "id": "verbose",
+          "mean_nll": 2.4849066497880004
+        }
+      ],
+      "n": 3
+    },
+    "multilabel": {
+      "winner": "verbose",
+      "nll": [
+        {
+          "id": "identity",
+          "mean_nll": 13.815510557964274
+        },
+        {
+          "id": "short",
+          "mean_nll": 13.815510557964274
+        },
+        {
+          "id": "verbose",
+          "mean_nll": 1.791759469228055
+        }
+      ],
+      "n": 2
+    },
+    "oos": {
+      "winner": "verbose",
+      "nll": [
+        {
+          "id": "identity",
+          "mean_nll": 5.568627438620147
+        },
+        {
+          "id": "short",
+          "mean_nll": 5.568627438620147
+        },
+        {
+          "id": "verbose",
+          "mean_nll": 5.53623952246893
+        }
+      ],
+      "n": 3
+    },
+    "ordinal": {
+      "winner": "identity",
+      "nll": [
+        {
+          "id": "identity",
+          "mean_nll": 1.6094379124341003
+        },
+        {
+          "id": "short",
+          "mean_nll": 1.6094379124341003
+        },
+        {
+          "id": "verbose",
+          "mean_nll": 2.5649493574615367
+        }
+      ],
+      "n": 3
+    },
+    "policy": {
+      "winner": "identity",
+      "nll": [
+        {
+          "id": "identity",
+          "mean_nll": 0.9241962407465937
+        },
+        {
+          "id": "short",
+          "mean_nll": 0.9241962407465937
+        },
+        {
+          "id": "verbose",
+          "mean_nll": 1.6566044331920002
+        }
+      ],
+      "n": 3
+    },
+    "routing": {
+      "winner": "verbose",
+      "nll": [
+        {
+          "id": "identity",
+          "mean_nll": 13.815510557964274
+        },
+        {
+          "id": "short",
+          "mean_nll": 13.815510557964274
+        },
+        {
+          "id": "verbose",
+          "mean_nll": 7.880710353509794
+        }
+      ],
+      "n": 4
+    },
+    "tree": {
+      "winner": "verbose",
+      "nll": [
+        {
+          "id": "identity",
+          "mean_nll": 13.815510557964274
+        },
+        {
+          "id": "short",
+          "mean_nll": 13.815510557964274
+        },
+        {
+          "id": "verbose",
+          "mean_nll": 7.7601293251013495
+        }
+      ],
+      "n": 2
+    }
+  },
+  "note": "overlap proxy on dev_gold only; not authored144"
+}

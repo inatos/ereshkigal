@@ -340,6 +340,37 @@ mod tests {
     }
 
     #[test]
+    fn grouped_oof_keeps_contrast_members_together() {
+        let mut rows = Vec::new();
+        let mut groups = Vec::new();
+        for g in 0..6 {
+            let gid = format!("g{g}");
+            for _ in 0..4 {
+                rows.push((vec![2.0, 0.1], 0));
+                groups.push(gid.clone());
+            }
+        }
+        let folds = 3;
+        let mut fold_of_group = std::collections::BTreeMap::new();
+        for (i, g) in groups.iter().enumerate() {
+            let f = fold_of(i, Some(g.as_str()), folds);
+            fold_of_group
+                .entry(g.clone())
+                .and_modify(|seen: &mut Vec<usize>| {
+                    if !seen.contains(&f) {
+                        seen.push(f);
+                    }
+                })
+                .or_insert_with(|| vec![f]);
+        }
+        for (g, fs) in &fold_of_group {
+            assert_eq!(fs.len(), 1, "group {g} split across folds {fs:?}");
+        }
+        let o = fit_temperature_oof_grouped(&rows, Some(&groups), folds).unwrap();
+        assert!(o.mean_temperature.is_finite());
+    }
+
+    #[test]
     fn family_ba_averages_groups() {
         let fam = vec!["a".into(), "a".into(), "b".into(), "b".into()];
         let pred = vec![0, 0, 1, 0];

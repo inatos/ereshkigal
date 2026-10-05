@@ -1,0 +1,19 @@
+{
+  "gold": "/home/inatos/Documents/_Projects/Betwixt/betwixt_engine/tools/ereshkigal/fixtures/dev_gold.jsonl",
+  "n": 20,
+  "n_train_proxy": 13,
+  "n_holdout_proxy": 7,
+  "evidence_bar": {
+    "target_BA_without_verify": 0.75,
+    "report": [
+      "BA",
+      "ECE"
+    ],
+    "forbid": [
+      "1e-6 vs SemIf",
+      "fit on authored144 test"
+    ]
+  },
+  "status": "scaffolded",
+  "note": "Run teacher_label.py then train_lora.py; fill BA/ECE after a real train."
+}

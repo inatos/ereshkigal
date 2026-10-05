@@ -381,7 +381,7 @@ impl<'a> Parser<'a> {
                         self.bump();
                         pairwise = true;
                     }
-                    if matches!(self.peek(), Some(Tok::Filter) | Some(Tok::Top) | Some(Tok::Sort)) {
+                    if matches!(self.peek(), Some(Tok::Filter) | Some(Tok::Top) | Some(Tok::Sort) | Some(Tok::Group)) {
                         foreach = Some(self.parse_foreach()?);
                     }
                     nodes.push(ProgramNode {
@@ -429,6 +429,14 @@ impl<'a> Parser<'a> {
                     path,
                     op: ForEachOp::TopK,
                     k: Some(k),
+                })
+            }
+            Some(Tok::Group) => {
+                let path = self.ident()?;
+                Ok(ForEach {
+                    path,
+                    op: ForEachOp::Group,
+                    k: None,
                 })
             }
             Some(Tok::Sort) => {
@@ -684,5 +692,23 @@ decree route "Which queue?" {
         let lib = parse_library(src).unwrap();
         let t = convert_to_toml(&lib).unwrap();
         assert!(t.contains("route"));
+    }
+
+    #[test]
+    fn parse_group_foreach() {
+        let src = r#"
+decree tag "Which bucket?" {
+  a "A"
+  b "B"
+}
+program p {
+  let buckets = tag group items
+}
+"#;
+        let lib = parse_library(src).unwrap();
+        let p = lib.program("p").unwrap();
+        let fe = p.nodes[0].foreach.as_ref().expect("foreach");
+        assert_eq!(fe.op, ForEachOp::Group);
+        assert_eq!(fe.path, "items");
     }
 }

@@ -19,8 +19,9 @@ Runtime never decodes answer tokens. Abstain, guards, chaining, collections, pai
 | `decide` / `run` | Real (needs `--gguf` or `ERESHKIGAL_GGUF`) |
 | `test --lib decrees --gguf …` | Real scored gate; without `--gguf` only counts gold rows |
 | `serve --stdio --lib … --gguf …` | Real JSON-RPC over stdio |
-| `lsp` | Real parse/lint diagnostics on `didOpen` / `didChange` |
-| HTTP serve, completion/hover LSP, distill/optimize | Stub / later |
+| `serve --http PORT --lib …` | Real JSON-RPC (`POST /rpc` or `POST /{method}`) |
+| `lsp` | Diagnostics + completion + hover on `.esk` |
+| `optimize` / `distill` | Wording pick on **split=dev**; logistic probe from JSONL |
 
 Tokenizer is chosen from the GGUF filename (`0.6B` → Qwen3-0.6B pin; otherwise Qwen3.5-4B). Optional `N_GPU_LAYERS` for offload.
 
@@ -47,7 +48,7 @@ One JSON object per line:
 ./target/release/ereshkigal lsp
 ```
 
-Full-document sync. On open/change of `.esk` (or `.toml`), publishes `textDocument/publishDiagnostics` for parse errors and library lint failures. No completion or hover yet.
+Full-document sync. On open/change of `.esk` (or `.toml`), publishes `textDocument/publishDiagnostics` for parse errors and library lint failures. Completion offers keywords + decree/program names. Hover shows decree question and options.
 
 ### Decree gold gate (0.6B)
 

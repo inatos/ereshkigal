@@ -177,6 +177,7 @@ pub enum ForEachOp {
     Filter,
     TopK,
     SortPairwise,
+    Group,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]

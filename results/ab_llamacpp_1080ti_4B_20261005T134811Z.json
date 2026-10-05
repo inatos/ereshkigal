@@ -2,10 +2,10 @@
   "n": 3,
   "argmax_agree": 1.0,
   "argmax_agree_n": 3,
-  "max_abs_dp": 0.004666580296192713,
+  "max_abs_dp": 0.005322135871392519,
   "prompt_sha_agree": 1.0,
-  "mean_ereshkigal_s": 0.5067931976666666,
-  "mean_semif_s": 3.0674817026689802,
+  "mean_ereshkigal_s": 3.337060944333333,
+  "mean_semif_s": 3.2764495933273188,
   "gguf": "/home/inatos/Documents/_Projects/Betwixt/betwixt_engine/.wordkeep/models/bartowski-Qwen3.5-4B-Q4_K_M.gguf",
   "gguf_sha256": "13c16f426047e2de38cd075bdade4a7bcbc8c774384876f677740cda65f8a983",
   "model": "Qwen/Qwen3.5-4B",
@@ -15,6 +15,6 @@
   "threads": 8,
   "n_gpu_layers": 99,
   "gate_max_abs_dp": 0.01,
-  "stamp": "20261005T151949Z",
+  "stamp": "20261005T134811Z",
   "claim": "Measured same-GGUF llamacpp A/B"
 }

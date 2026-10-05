@@ -14,9 +14,28 @@ use sha2::{Digest, Sha256};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
+use std::sync::OnceLock;
 
 const DECODE_CHUNK: usize = 512;
 
+/// llama.cpp allows one `llama_backend_init` per process. Wordkeep tandem (GPU
+/// draft + CPU draft) and draft+verify need multiple models, so we leak the
+/// first successful backend and reuse it.
+static SHARED_BACKEND: OnceLock<std::result::Result<&'static LlamaBackend, String>> =
+    OnceLock::new();
+
+fn shared_backend() -> Result<&'static LlamaBackend> {
+    let cached = SHARED_BACKEND.get_or_init(|| match LlamaBackend::init() {
+        Ok(backend) => Ok(Box::leak(Box::new(backend)) as &'static LlamaBackend),
+        Err(e) => Err(e.to_string()),
+    });
+    match cached {
+        Ok(b) => Ok(*b),
+        Err(e) => Err(Error::Engine(e.clone())),
+    }
+}
+
+#[derive(Clone)]
 pub struct EngineConfig {
     pub gguf: PathBuf,
     pub tokenizer_source: String,
@@ -30,9 +49,9 @@ pub struct EngineConfig {
 }
 
 /// Process-scoped llama.cpp scorer. The model is leaked for a `'static` context lifetime
-/// (appropriate for a CLI or long-lived scoring process).
+/// (appropriate for a CLI or long-lived scoring process). Backend is process-global
+/// ([`shared_backend`]) so tandem GPU+CPU and draft+verify can coexist.
 pub struct EngineOwned {
-    _backend: LlamaBackend,
     model: &'static LlamaModel,
     ctx: LlamaContext<'static>,
     pub meta: ModelMeta,
@@ -55,13 +74,13 @@ impl EngineOwned {
         let gguf_meta = hash_gguf(&cfg.gguf)?;
 
         send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
-        let backend = LlamaBackend::init().map_err(|e| Error::Engine(e.to_string()))?;
+        let backend = shared_backend()?;
         let mut model_params = LlamaModelParams::default();
         if cfg.n_gpu_layers > 0 {
             model_params = model_params.with_n_gpu_layers(cfg.n_gpu_layers);
         }
         let model_params = pin!(model_params);
-        let model = LlamaModel::load_from_file(&backend, &cfg.gguf, &model_params)
+        let model = LlamaModel::load_from_file(backend, &cfg.gguf, &model_params)
             .map_err(|e| Error::Engine(format!("load GGUF: {e}")))?;
         let model: &'static LlamaModel = Box::leak(Box::new(model));
 
@@ -74,8 +93,8 @@ impl EngineOwned {
             .with_n_seq_max(n_seq_max)
             .with_embeddings(cfg.embeddings);
 
-        let mut ctx = model
-            .new_context(&backend, ctx_params)
+        let ctx = model
+            .new_context(backend, ctx_params)
             .map_err(|e| Error::Engine(format!("create context: {e}")))?;
 
         if let Some(adapter_path) = &cfg.adapter {
@@ -106,7 +125,6 @@ impl EngineOwned {
 
         Ok((
             Self {
-                _backend: backend,
                 model,
                 ctx,
                 meta,
@@ -356,4 +374,48 @@ fn verify_vocab_agreement(tokenizer: &ReferenceTokenizer, model: &LlamaModel) ->
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two loads in one process used to fail with BackendAlreadyInitialized.
+    /// Skips when ERESHKIGAL_GGUF is unset.
+    #[test]
+    fn shared_backend_allows_second_engine_load() {
+        let Ok(gguf) = std::env::var("ERESHKIGAL_GGUF") else {
+            return;
+        };
+        let path = PathBuf::from(&gguf);
+        if !path.is_file() {
+            return;
+        }
+        let tok_src = std::env::var("ERESHKIGAL_TOKENIZER_SOURCE")
+            .unwrap_or_else(|_| "Qwen/Qwen3-0.6B".into());
+        let tok_rev = std::env::var("ERESHKIGAL_TOKENIZER_REVISION").unwrap_or_else(|_| {
+            "c1899de289a04d12100db370d81485cdf75e47ca".into()
+        });
+        let gpu_layers: u32 = std::env::var("N_GPU_LAYERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let base = EngineConfig {
+            gguf: path,
+            tokenizer_source: tok_src,
+            tokenizer_revision: tok_rev,
+            max_prompt_tokens: 2048,
+            threads: 4,
+            n_gpu_layers: gpu_layers,
+            n_seq_max: 1,
+            embeddings: false,
+            adapter: None,
+        };
+        let (a, _) = EngineOwned::load(base.clone()).expect("first engine load");
+        let mut cpu = base;
+        cpu.n_gpu_layers = 0;
+        let (b, _) = EngineOwned::load(cpu).expect("second engine load (shared backend)");
+        assert_eq!(a.meta.n_gpu_layers, gpu_layers as i32);
+        assert_eq!(b.meta.n_gpu_layers, 0);
+    }
 }

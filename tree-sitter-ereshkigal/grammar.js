@@ -13,8 +13,14 @@ module.exports = grammar({
     ),
     program: $ => seq("program", $.ident, optional(seq("(", $.ident, ")")), "{", repeat($.stmt), "}"),
     stmt: $ => choice(
-      seq("let", $.ident, "=", $.ident, optional(seq("(", repeat($.ident), ")"))),
+      seq("let", $.ident, "=", $.ident, optional($.foreach)),
       seq("match", $.ident, "{", repeat($.ident), "}")
+    ),
+    foreach: $ => choice(
+      seq("filter", $.ident),
+      seq("group", $.ident),
+      seq("top", $.number, "of", $.ident),
+      seq("sort", $.ident, optional("pairwise"))
     ),
     ident: _ => /[A-Za-z_][A-Za-z0-9_-]*/,
     string: _ => /"([^"\\]|\\.)*"/,

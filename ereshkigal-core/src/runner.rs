@@ -264,6 +264,16 @@ impl Runtime {
                         }
                         facts.insert(node.id.clone(), out.join(","));
                     }
+                    ForEachOp::Group => {
+                        let mut buckets: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+                        for item in items {
+                            let d = self.decide(lib, &node.decree, &item)?;
+                            forwards += 1;
+                            let key = d.choice.unwrap_or_else(|| "_abstain".into());
+                            buckets.entry(key).or_default().push(item);
+                        }
+                        facts.insert(node.id.clone(), serde_json::to_string(&buckets)?);
+                    }
                 }
                 continue;
             }

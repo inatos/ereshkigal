@@ -61,6 +61,47 @@ impl Manifest {
     }
 }
 
+/// Fingerprint a path dependency (file names + contents) for `fetch`/`verify`.
+pub fn fingerprint_path(root: impl AsRef<Path>) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let root = root.as_ref();
+    let mut files = Vec::new();
+    collect_files(root, root, &mut files)?;
+    files.sort();
+    let mut h = Sha256::new();
+    for rel in files {
+        h.update(rel.as_bytes());
+        h.update(b"\0");
+        let abs = root.join(&rel);
+        if let Ok(bytes) = std::fs::read(&abs) {
+            h.update(&bytes);
+        }
+        h.update(b"\0");
+    }
+    Ok(hex::encode(h.finalize()))
+}
+
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
+    if !dir.is_dir() {
+        return Err(Error::Validation(format!("not a directory: {}", dir.display())));
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        let name = entry.file_name();
+        if name == ".git" || name == "target" || name == "node_modules" {
+            continue;
+        }
+        if p.is_dir() {
+            collect_files(root, &p, out)?;
+        } else if p.is_file() {
+            let rel = p.strip_prefix(root).unwrap_or(&p);
+            out.push(rel.to_string_lossy().into_owned());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

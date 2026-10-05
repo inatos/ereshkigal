@@ -9,6 +9,7 @@ pub mod error;
 pub mod lint;
 pub mod lockfile;
 pub mod metrics;
+pub mod optimize;
 pub mod pkg;
 pub mod probe;
 pub mod prompt;
@@ -26,6 +27,7 @@ pub use calib::{
     fit_temperature_oof_grouped, mean_family_balanced_accuracy, OofCalib,
 };
 pub use conformal::{coverage as conformal_coverage, fit_qhat, mean_set_size, option_set};
+pub use optimize::{overlap_nll, pick_lowest_nll, rank_variants_overlap};
 pub use debias::{
     apply_content_free, apply_pride, cycle_options, permute_debias, pride_frac_count,
     pride_log_prior, prior_from_content_free,

@@ -13,8 +13,9 @@ use ereshkigal_core::{
 };
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+
+mod serve;
 
 #[derive(Parser, Debug)]
 #[command(name = "ereshkigal", about = "Ereshkigal decision language")]
@@ -195,8 +196,13 @@ fn main() -> Result<()> {
         } => run_test(&lib, gguf, fit, &split, locked)?,
         Cmd::Lock { lib, out } => {
             let library = Library::load(&lib)?;
+            let tmpl = ereshkigal_core::template::render_chat(
+                ereshkigal_core::template::QWEN3_THINKING_OFF,
+                &[("system".into(), "sys".into()), ("user".into(), "u".into())],
+            )?;
             let mut lf = Lockfile {
                 recipe: library.recipe.clone(),
+                template_hash: ereshkigal_core::template::template_hash(&tmpl),
                 ..Default::default()
             };
             for (name, d) in &library.decrees {
@@ -210,13 +216,12 @@ fn main() -> Result<()> {
             println!("wrote {}", out.display());
         }
         Cmd::Serve { stdio, http, lib, gguf } => {
-            if http.is_some() {
-                bail!("HTTP serve is not implemented yet; use --stdio");
+            if let Some(port) = http {
+                serve::serve_http(port, &lib, gguf)?;
+            } else {
+                let _ = stdio;
+                serve::serve_stdio(&lib, gguf)?;
             }
-            if !stdio && http.is_none() {
-                // Default to stdio when neither flag is set.
-            }
-            serve_stdio(&lib, gguf)?;
         }
         Cmd::Lsp => run_lsp()?,
         Cmd::Explain {
@@ -246,23 +251,64 @@ fn main() -> Result<()> {
             let library = Library::load(&lib)?;
             let d = library.decree(&decree)?;
             if d.variants.is_empty() {
-                println!("no variants on {decree}");
+                println!("no variants on {decree}; add [[decree.variants]] and re-run on split=dev");
             } else {
-                println!("{} variants; pick on dev with `ereshkigal test --fit`", d.variants.len());
+                let gold = d
+                    .tests
+                    .iter()
+                    .filter(|t| t.split.as_deref().unwrap_or("dev") == "dev")
+                    .collect::<Vec<_>>();
+                if gold.is_empty() {
+                    anyhow::bail!("no split=dev tests; refuse to fit wording on test");
+                }
+                let mut nll = Vec::new();
+                for v in &d.variants {
+                    let mut acc = 0.0;
+                    for t in &gold {
+                        let expect = t.expect.clone();
+                        let state = t.state.to_string();
+                        acc += ereshkigal_core::overlap_nll(
+                            v.question.as_deref().unwrap_or(&d.question),
+                            &state,
+                            &expect,
+                        );
+                    }
+                    nll.push((v.id.clone(), acc / gold.len() as f64));
+                }
+                let winner = ereshkigal_core::pick_lowest_nll(&nll)?;
+                println!("dev-split winner={winner} nll={nll:?}");
             }
         }
         Cmd::Distill { corpus, out, recipe } => {
-            println!(
-                "distill corpus={} out={} recipe={} (train logistic probe; see training/README.md)",
-                corpus.display(),
-                out.display(),
-                recipe
-            );
-            let mut probe = ereshkigal_core::probe::LogisticProbe::zeros(8, 3, &recipe, 1e-3);
-            let xs = vec![vec![1.0; 8], vec![0.0; 8]];
-            let ys = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
-            ereshkigal_core::probe::train_epoch(&mut probe, &xs, &ys, 0.1)?;
+            let src = fs::read_to_string(&corpus)?;
+            let mut xs = Vec::new();
+            let mut ys = Vec::new();
+            for line in src.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let v: Value = serde_json::from_str(line)?;
+                if let (Some(x), Some(y)) = (v.get("x"), v.get("y")) {
+                    let xv: Vec<f64> = serde_json::from_value(x.clone()).unwrap_or_default();
+                    let yv: Vec<f64> = serde_json::from_value(y.clone()).unwrap_or_default();
+                    if !xv.is_empty() && !yv.is_empty() {
+                        xs.push(xv);
+                        ys.push(yv);
+                    }
+                }
+            }
+            if xs.is_empty() {
+                xs = vec![vec![1.0; 8], vec![0.0; 8]];
+                ys = vec![vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0]];
+            }
+            let dim = xs[0].len();
+            let n_classes = ys[0].len();
+            let mut probe = ereshkigal_core::probe::LogisticProbe::zeros(dim, n_classes, &recipe, 1e-3);
+            for _ in 0..8 {
+                ereshkigal_core::probe::train_epoch(&mut probe, &xs, &ys, 0.1)?;
+            }
             fs::write(out, serde_json::to_string_pretty(&probe)?)?;
+            println!("wrote probe recipe={recipe} n={}", xs.len());
         }
         Cmd::New { name } => {
             fs::create_dir_all(&name)?;
@@ -301,7 +347,13 @@ fn main() -> Result<()> {
             let man = load_manifest()?;
             println!("packages={}", man.dependencies.len());
             for (k, v) in &man.dependencies {
-                println!("{k}: {v:?}");
+                match v {
+                    ereshkigal_core::pkg::DepSource::Path { path } => {
+                        let fp = ereshkigal_core::pkg::fingerprint_path(path)?;
+                        println!("{k}: path={path} sha256={fp}");
+                    }
+                    other => println!("{k}: {other:?} (remote: not fetched)"),
+                }
             }
         }
         Cmd::Publish { dry_run } => {
@@ -334,7 +386,7 @@ fn tokenizer_for_gguf(gguf: &Path) -> (String, String) {
     }
 }
 
-fn load_runtime(gguf: Option<PathBuf>) -> Result<Runtime> {
+pub(crate) fn load_runtime(gguf: Option<PathBuf>) -> Result<Runtime> {
     let gguf = gguf
         .or_else(|| std::env::var_os("ERESHKIGAL_GGUF").map(PathBuf::from))
         .ok_or_else(|| anyhow::anyhow!("--gguf or ERESHKIGAL_GGUF required"))?;
@@ -430,101 +482,7 @@ fn run_test(lib: &Path, gguf: Option<PathBuf>, fit: bool, split: &str, locked: b
     Ok(())
 }
 
-fn serve_stdio(lib_path: &Path, gguf: Option<PathBuf>) -> Result<()> {
-    let library = Library::load(lib_path)?;
-    let gguf_path = gguf
-        .clone()
-        .or_else(|| std::env::var_os("ERESHKIGAL_GGUF").map(PathBuf::from));
-    let mut runtime = match &gguf_path {
-        Some(p) => Some(load_runtime(Some(p.clone()))?),
-        None => None,
-    };
-    eprintln!(
-        "[ereshkigal] serve stdio lib={} decrees={} programs={} gguf={}",
-        lib_path.display(),
-        library.decrees.len(),
-        library.programs.len(),
-        gguf_path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "(none — decide/run/test need --gguf)".into())
-    );
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let req: Value = serde_json::from_str(&line).unwrap_or(json!({}));
-        let id = req.get("id").cloned().unwrap_or(json!(null));
-        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = req.get("params").cloned().unwrap_or(json!({}));
-        let result = match method {
-            "lint" => match ereshkigal_core::lint::lint_library(&library) {
-                Ok(()) => json!({"ok": true}),
-                Err(e) => json!({"ok": false, "error": e.to_string()}),
-            },
-            "stats" => json!({
-                "backend": "llamacpp",
-                "lib": lib_path.display().to_string(),
-                "decrees": library.decrees.len(),
-                "programs": library.programs.len(),
-                "gguf_loaded": runtime.is_some(),
-                "gguf": gguf_path.as_ref().map(|p| p.display().to_string()),
-                "recipe": library.recipe,
-            }),
-            "decide" => match runtime.as_mut() {
-                None => json!({"error": "gguf not loaded; pass --gguf or ERESHKIGAL_GGUF"}),
-                Some(rt) => {
-                    let decree = params
-                        .get("decree")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let state = params.get("state").cloned().unwrap_or(json!(""));
-                    match rt.decide(&library, decree, &state) {
-                        Ok(d) => serde_json::to_value(d).unwrap_or(json!({"error": "serialize"})),
-                        Err(e) => json!({"error": e.to_string()}),
-                    }
-                }
-            },
-            "run" => match runtime.as_mut() {
-                None => json!({"error": "gguf not loaded; pass --gguf or ERESHKIGAL_GGUF"}),
-                Some(rt) => {
-                    let program = params
-                        .get("program")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let state = params.get("state").cloned().unwrap_or(json!(""));
-                    match rt.run(&library, program, &state) {
-                        Ok(d) => serde_json::to_value(d).unwrap_or(json!({"error": "serialize"})),
-                        Err(e) => json!({"error": e.to_string()}),
-                    }
-                }
-            },
-            "test" => match runtime.as_mut() {
-                None => json!({"error": "gguf not loaded; pass --gguf or ERESHKIGAL_GGUF"}),
-                Some(rt) => {
-                    let split = params
-                        .get("split")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("all");
-                    match score_library_tests(rt, &library, split) {
-                        Ok(v) => v,
-                        Err(e) => json!({"error": e.to_string()}),
-                    }
-                }
-            },
-            _ => json!({"error": format!("unknown method {method}")}),
-        };
-        let resp = json!({"jsonrpc": "2.0", "id": id, "result": result});
-        writeln!(stdout, "{}", serde_json::to_string(&resp)?)?;
-        stdout.flush()?;
-    }
-    Ok(())
-}
-
-fn score_library_tests(rt: &mut Runtime, library: &Library, split: &str) -> Result<Value> {
+pub(crate) fn score_library_tests(rt: &mut Runtime, library: &Library, split: &str) -> Result<Value> {
     let mut pred = Vec::new();
     let mut gold = Vec::new();
     let mut groups = Vec::new();
@@ -616,21 +574,98 @@ fn diagnostics_for_text(uri: &str, text: &str) -> Vec<lsp_types::Diagnostic> {
     }
 }
 
+const KEYWORDS: &[&str] = &[
+    "recipe", "decree", "program", "let", "match", "abstain", "test", "filter",
+    "sort", "pairwise", "return", "escalate", "group", "top",
+];
+
+fn completion_items(text: &str) -> Vec<lsp_types::CompletionItem> {
+    use lsp_types::{CompletionItem, CompletionItemKind};
+    let mut items: Vec<CompletionItem> = KEYWORDS
+        .iter()
+        .map(|k| CompletionItem {
+            label: (*k).into(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("ereshkigal".into()),
+            ..Default::default()
+        })
+        .collect();
+    if let Ok(lib) = parse_library(text) {
+        for name in lib.decrees.keys() {
+            items.push(CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some("decree".into()),
+                ..Default::default()
+            });
+        }
+        for name in lib.programs.keys() {
+            items.push(CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: Some("program".into()),
+                ..Default::default()
+            });
+        }
+    }
+    items
+}
+
+fn hover_markdown(text: &str, word: &str) -> Option<String> {
+    let lib = parse_library(text).ok()?;
+    if let Ok(d) = lib.decree(word) {
+        let opts: Vec<String> = d.options.iter().map(|o| format!("- `{}`: {}", o.id, o.description)).collect();
+        return Some(format!("**decree {}**\n\n{}\n\n{}", d.name, d.question, opts.join("\n")));
+    }
+    if lib.program(word).is_ok() {
+        return Some(format!("**program {word}**"));
+    }
+    if KEYWORDS.contains(&word) {
+        return Some(format!("`{word}` (Ereshkigal keyword)"));
+    }
+    None
+}
+
+fn word_at(text: &str, line: u32, character: u32) -> String {
+    let Some(row) = text.lines().nth(line as usize) else {
+        return String::new();
+    };
+    let chars: Vec<char> = row.chars().collect();
+    let i = (character as usize).min(chars.len());
+    let mut a = i;
+    let mut b = i;
+    while a > 0 && (chars[a - 1].is_ascii_alphanumeric() || chars[a - 1] == '_' || chars[a - 1] == '-') {
+        a -= 1;
+    }
+    while b < chars.len() && (chars[b].is_ascii_alphanumeric() || chars[b] == '_' || chars[b] == '-') {
+        b += 1;
+    }
+    chars[a..b].iter().collect()
+}
+
 fn run_lsp() -> Result<()> {
     use lsp_server::{Connection, Message, Notification, Response};
     use lsp_types::{
         notification::{DidChangeTextDocument, DidOpenTextDocument, Notification as _},
-        request::{Request as _, Shutdown},
-        InitializeParams, PublishDiagnosticsParams, ServerCapabilities, TextDocumentSyncCapability,
-        TextDocumentSyncKind, Uri,
+        request::{Completion, HoverRequest, Request as _, Shutdown},
+        CompletionOptions, Hover, HoverContents, HoverProviderCapability, InitializeParams,
+        MarkupContent, MarkupKind, PublishDiagnosticsParams, ServerCapabilities,
+        TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
     };
+    use std::collections::HashMap;
     let (connection, io_threads) = Connection::stdio();
     let caps = ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![" ".into()]),
+            ..Default::default()
+        }),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
         ..Default::default()
     };
     let init = connection.initialize(serde_json::to_value(caps)?)?;
     let _: InitializeParams = serde_json::from_value(init).unwrap_or_default();
+    let mut docs: HashMap<String, String> = HashMap::new();
 
     let publish = |conn: &Connection, uri: Uri, text: &str| -> Result<()> {
         let diags = diagnostics_for_text(uri.as_str(), text);
@@ -664,9 +699,48 @@ fn run_lsp() -> Result<()> {
                     connection.sender.send(Message::Response(resp))?;
                     continue;
                 }
+                let result = if req.method == Completion::METHOD {
+                    let params: lsp_types::CompletionParams =
+                        serde_json::from_value(req.params.clone()).unwrap_or_else(|_| {
+                            serde_json::from_value(json!({
+                                "textDocument": {"uri": "file:///x.esk"},
+                                "position": {"line": 0, "character": 0}
+                            }))
+                            .unwrap()
+                        });
+                    let uri = params.text_document_position.text_document.uri.to_string();
+                    let text = docs.get(&uri).cloned().unwrap_or_default();
+                    json!(completion_items(&text))
+                } else if req.method == HoverRequest::METHOD {
+                    let params: lsp_types::HoverParams =
+                        serde_json::from_value(req.params.clone()).unwrap_or_else(|_| {
+                            serde_json::from_value(json!({
+                                "textDocument": {"uri": "file:///x.esk"},
+                                "position": {"line": 0, "character": 0}
+                            }))
+                            .unwrap()
+                        });
+                    let uri = params.text_document_position_params.text_document.uri.to_string();
+                    let pos = params.text_document_position_params.position;
+                    let text = docs.get(&uri).cloned().unwrap_or_default();
+                    let word = word_at(&text, pos.line, pos.character);
+                    match hover_markdown(&text, &word) {
+                        Some(md) => serde_json::to_value(Hover {
+                            contents: HoverContents::Markup(MarkupContent {
+                                kind: MarkupKind::Markdown,
+                                value: md,
+                            }),
+                            range: None,
+                        })
+                        .unwrap_or(json!(null)),
+                        None => json!(null),
+                    }
+                } else {
+                    json!(null)
+                };
                 let resp = Response {
                     id: req.id,
-                    result: Some(json!(null)),
+                    result: Some(result),
                     error: None,
                 };
                 connection.sender.send(Message::Response(resp))?;
@@ -676,6 +750,8 @@ fn run_lsp() -> Result<()> {
                     if let Ok(params) =
                         serde_json::from_value::<lsp_types::DidOpenTextDocumentParams>(not.params)
                     {
+                        let uri = params.text_document.uri.to_string();
+                        docs.insert(uri, params.text_document.text.clone());
                         publish(
                             &connection,
                             params.text_document.uri,
@@ -687,6 +763,10 @@ fn run_lsp() -> Result<()> {
                         serde_json::from_value::<lsp_types::DidChangeTextDocumentParams>(not.params)
                     {
                         if let Some(change) = params.content_changes.last() {
+                            docs.insert(
+                                params.text_document.uri.to_string(),
+                                change.text.clone(),
+                            );
                             publish(
                                 &connection,
                                 params.text_document.uri,

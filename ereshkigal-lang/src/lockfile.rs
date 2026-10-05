@@ -88,4 +88,21 @@ mod tests {
         };
         assert!(!a.drift(&b).is_empty());
     }
+
+    #[test]
+    fn drift_detects_gguf_and_template() {
+        let a = Lockfile {
+            gguf_sha256: "aaa".into(),
+            template_hash: "t1".into(),
+            ..Default::default()
+        };
+        let b = Lockfile {
+            gguf_sha256: "bbb".into(),
+            template_hash: "t2".into(),
+            ..Default::default()
+        };
+        let d = a.drift(&b);
+        assert!(d.iter().any(|s| s.contains("gguf")));
+        assert!(d.iter().any(|s| s.contains("template")));
+    }
 }

@@ -8,8 +8,11 @@ option      = ident string ;
 abstain     = "abstain" [ "coverage" number ] [ "=>" ( "return" | "escalate" | "fail" | ident ) ] ;
 cost        = "cost" ident "->" ident "=" number ;
 test        = "test" [ "dev" | "test" ] [ "group" string ] string "=>" ident ;
-program     = "program" ident [ "(" ident ")" ] "{" { let | match } "}" ;
-let         = "let" ident "=" ident [ "(" ident { "," ident } ")" ] [ "pairwise" ] ;
+pass     = { filter | topk | group | sort } ;
+filter    = "filter" ident ;
+group     = "group" ident ;
+topk      = "top" number "of" ident ;
+sort      = "sort" ident [ "pairwise" ] ;
 ```
 
 Parser: logos + recursive descent (`ereshkigal-lang::syntax`). Formatter: `ereshkigal fmt`.
