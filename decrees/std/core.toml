@@ -19,7 +19,7 @@ group = "std-evidence-1"
 split = "dev"
 
 [[decrees.evidence_yn.tests]]
-state = "No logs are available for the change window."
+state = "Claim: the deploy succeeded. Available evidence: none. No logs, no health checks, and no status report for the change window."
 expect = "insufficient"
 group = "std-evidence-1"
 split = "dev"

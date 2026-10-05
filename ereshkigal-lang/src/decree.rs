@@ -277,6 +277,18 @@ impl Library {
         Ok(lib)
     }
 
+    /// Parse a single TOML library document from a string (LSP / serve helpers).
+    pub fn load_from_toml_str(src: &str) -> Result<Self> {
+        let mut lib = Library {
+            recipe: crate::types::PROMPT_VERSION.to_string(),
+            ..Default::default()
+        };
+        let file: LibraryFile =
+            toml::from_str(src).map_err(|e| Error::Parse(e.to_string()))?;
+        lib.merge_file(file)?;
+        Ok(lib)
+    }
+
     pub fn decree(&self, name: &str) -> Result<&Decree> {
         self.decrees
             .get(name)
@@ -420,5 +432,20 @@ options = [
             .to_row("t", json!("ok"))
             .unwrap();
         assert_eq!(row.question.contains("deploy"), true);
+    }
+
+    #[test]
+    fn load_from_toml_str_parses() {
+        let src = r#"
+recipe = "direct-options-v1"
+[decrees.x]
+question = "Q?"
+options = [
+  { id = "a", description = "A" },
+  { id = "b", description = "B" },
+]
+"#;
+        let lib = Library::load_from_toml_str(src).unwrap();
+        assert!(lib.decree("x").is_ok());
     }
 }
