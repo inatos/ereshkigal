@@ -1,0 +1,99 @@
+{
+  "n": 9,
+  "argmax_agreement": 1.0,
+  "argmax_agree_n": 9,
+  "max_abs_delta_p": 0.127533,
+  "latency_claim_ok": true,
+  "peft_metrics": {
+    "n": 9,
+    "BA": 1.0,
+    "ECE": 0.0991,
+    "accuracy": 1.0
+  },
+  "prompt_version": "direct-options-v1",
+  "adapter": "/home/inatos/Documents/_Projects/Betwixt/betwixt_engine/.wordkeep/models/qwen3-0.6b-lora-dev.gguf",
+  "rows": [
+    {
+      "id": "dg-route-8-1",
+      "label": 0,
+      "peft": 0,
+      "gguf": 0,
+      "peft_conf": 0.972074568271637,
+      "gguf_conf": 0.9870674093185842,
+      "agree": true
+    },
+    {
+      "id": "dg-route-8-5",
+      "label": 5,
+      "peft": 5,
+      "gguf": 5,
+      "peft_conf": 0.990911602973938,
+      "gguf_conf": 0.9892042407638167,
+      "agree": true
+    },
+    {
+      "id": "dg-sev-2",
+      "label": 2,
+      "peft": 2,
+      "gguf": 2,
+      "peft_conf": 0.9824700355529785,
+      "gguf_conf": 0.9530774754843058,
+      "agree": true
+    },
+    {
+      "id": "dg-ml-2",
+      "label": 5,
+      "peft": 5,
+      "gguf": 5,
+      "peft_conf": 0.6152008771896362,
+      "gguf_conf": 0.7427334525875968,
+      "agree": true
+    },
+    {
+      "id": "dg-oos-4",
+      "label": 1,
+      "peft": 1,
+      "gguf": 1,
+      "peft_conf": 0.999687910079956,
+      "gguf_conf": 0.9997576436594091,
+      "agree": true
+    },
+    {
+      "id": "dg-tree-3",
+      "label": 6,
+      "peft": 6,
+      "gguf": 6,
+      "peft_conf": 0.9962301850318909,
+      "gguf_conf": 0.9948708516456352,
+      "agree": true
+    },
+    {
+      "id": "dg-contrast-3",
+      "label": 3,
+      "peft": 3,
+      "gguf": 3,
+      "peft_conf": 0.9998824596405029,
+      "gguf_conf": 0.9998809835152471,
+      "agree": true
+    },
+    {
+      "id": "dg-policy-2",
+      "label": 0,
+      "peft": 0,
+      "gguf": 0,
+      "peft_conf": 0.9993782043457031,
+      "gguf_conf": 0.999438027268435,
+      "agree": true
+    },
+    {
+      "id": "dg-policy-3",
+      "label": 2,
+      "peft": 2,
+      "gguf": 2,
+      "peft_conf": 0.5518814921379089,
+      "gguf_conf": 0.5797043182185224,
+      "agree": true
+    }
+  ],
+  "note": "PEFT FP32 vs GGUF Q8_0+adapter; 100% argmax required for latency claim"
+}

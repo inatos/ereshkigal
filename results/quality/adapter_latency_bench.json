@@ -1,0 +1,29 @@
+{
+  "status": "ok",
+  "ts": "2026-10-05T20:37:28Z",
+  "cold_adapter_attach_s": 9.763,
+  "warm_adapter_repeats_s": [
+    8.819,
+    9.011
+  ],
+  "baseline_no_adapter_s": 10.238,
+  "runs": [
+    {
+      "run": 0,
+      "wall_s": 9.763,
+      "returncode": 0
+    },
+    {
+      "run": 1,
+      "wall_s": 8.819,
+      "returncode": 0
+    },
+    {
+      "run": 2,
+      "wall_s": 9.011,
+      "returncode": 0
+    }
+  ],
+  "parity_latency_claim_ok": true,
+  "note": "wall clock includes model load+score holdout n=9; cold is first adapter attach"
+}

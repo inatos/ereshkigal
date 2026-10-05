@@ -1,0 +1,40 @@
+{
+  "bare_gguf": {
+    "n": 9,
+    "BA": 0.4286,
+    "ECE": 0.5062,
+    "accuracy": 0.4444,
+    "by_family": {
+      "routing": 0.5,
+      "ordinal": 0.0,
+      "multilabel": 1.0,
+      "oos": 0.0,
+      "tree": 1.0,
+      "contrast": 0.0,
+      "policy": 0.5
+    }
+  },
+  "adapter_gguf": {
+    "n": 9,
+    "BA": 1.0,
+    "ECE": 0.0838,
+    "accuracy": 1.0,
+    "by_family": {
+      "routing": 1.0,
+      "ordinal": 1.0,
+      "multilabel": 1.0,
+      "oos": 1.0,
+      "tree": 1.0,
+      "contrast": 1.0,
+      "policy": 1.0
+    }
+  },
+  "peft": {
+    "n": 9,
+    "BA": 1.0,
+    "ECE": 0.0991,
+    "accuracy": 1.0
+  },
+  "delta_BA_adapter_minus_bare": 0.5714,
+  "delta_ECE_adapter_minus_bare": -0.4224
+}

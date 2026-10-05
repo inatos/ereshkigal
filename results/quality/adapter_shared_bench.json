@@ -1,0 +1,35 @@
+{
+  "status": "ok",
+  "ts": "2026-10-05T23:25:17Z",
+  "n_rows": 3,
+  "n_seq_max": 32,
+  "adapter_scale": 1.5,
+  "n_gpu_layers": 99,
+  "free_mib": 9996,
+  "gguf": "/home/inatos/Documents/_Projects/Betwixt/betwixt_engine/.wordkeep/models/Qwen3-0.6B-Q8_0.gguf",
+  "adapter": "/home/inatos/Documents/_Projects/Betwixt/betwixt_engine/.wordkeep/models/qwen3-0.6b-lora-dev.gguf",
+  "bin": "/home/inatos/Documents/_Projects/Betwixt/betwixt_engine/tools/ereshkigal/target/release/semif-score",
+  "input": "/home/inatos/Documents/_Projects/Betwixt/betwixt_engine/tools/ereshkigal/fixtures/shared_state.jsonl",
+  "argmax_agreement": 1.0,
+  "direct": {
+    "cold_wall_ms": 4284,
+    "warm_wall_ms": [
+      4234,
+      4182
+    ],
+    "warm_mean_wall_ms": 4208.0,
+    "score_sum_ms": 1319.17
+  },
+  "shared": {
+    "cold_wall_ms": 3919,
+    "warm_wall_ms": [
+      3683,
+      3885
+    ],
+    "warm_mean_wall_ms": 3784.0,
+    "score_sum_ms": 951.0
+  },
+  "speedup_warm_wall_direct_over_shared": 1.112,
+  "speedup_score_sum_direct_over_shared": 1.387,
+  "note": "Process wall includes GGUF+adapter load each invoke; score_sum_ms is \u03a3 total_seconds from JSONL (decode only). Prefer score_sum speedup for shared vs direct."
+}

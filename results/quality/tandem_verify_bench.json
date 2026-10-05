@@ -1,0 +1,105 @@
+{
+  "status": "ok",
+  "ts": "2026-10-05T19:10:26Z",
+  "free_mib_at_start": 7851,
+  "used_mib_at_start": 3307,
+  "wall_ms_session": 18464,
+  "returncode": 0,
+  "gguf_verify_loaded": true,
+  "gguf_verify_lazy": true,
+  "cold_load_ms": 6041,
+  "cpu_draft_loaded": true,
+  "tandem": true,
+  "probes": {
+    "verify_first": {
+      "cascade_source": "cascade-verify",
+      "timing_us": 11977511,
+      "chosen": "identity",
+      "payload_keys": [
+        "calibrated",
+        "cascade_set_size",
+        "cascade_source",
+        "chosen",
+        "fallback",
+        "id",
+        "options",
+        "prompt_sha256",
+        "scorer",
+        "scorer_revision",
+        "timing_us"
+      ]
+    },
+    "verify_repeat": {
+      "cascade_source": "cascade-verify",
+      "timing_us": 12204,
+      "chosen": "identity",
+      "payload_keys": [
+        "calibrated",
+        "cascade_set_size",
+        "cascade_source",
+        "chosen",
+        "fallback",
+        "id",
+        "options",
+        "prompt_sha256",
+        "scorer",
+        "scorer_revision",
+        "timing_us"
+      ]
+    },
+    "draft_commit": {
+      "cascade_source": "cascade-draft",
+      "timing_us": 78625,
+      "chosen": "echo",
+      "payload_keys": [
+        "calibrated",
+        "cascade_set_size",
+        "cascade_source",
+        "chosen",
+        "fallback",
+        "id",
+        "options",
+        "prompt_sha256",
+        "scorer",
+        "scorer_revision",
+        "timing_us"
+      ]
+    }
+  },
+  "cascade_sources": [
+    "cascade-verify",
+    "cascade-verify",
+    "cascade-draft"
+  ],
+  "stderr_tail": "[wordkeep] root = /home/inatos/Documents/_Projects/Betwixt/betwixt_engine\n[wordkeep] semif engines: gpu_layers=99 tandem=true verify=lazy\n[wordkeep] semif engines prefetched (warm)\n[wordkeep] lazy-loading gguf_verify /home/inatos/Documents/_Projects/Betwixt/betwixt_engine/.wordkeep/models/Qwen3.5-4B-Q4_K_M.gguf\n[wordkeep] gguf_verify loaded (gpu_layers=99)\n",
+  "note": "cascade-verify observed; first uncertain pays cold 4B load under lazy verify",
+  "adapter_latency": {
+    "status": "ok",
+    "ts": "2026-10-05T20:37:28Z",
+    "cold_adapter_attach_s": 9.763,
+    "warm_adapter_repeats_s": [
+      8.819,
+      9.011
+    ],
+    "baseline_no_adapter_s": 10.238,
+    "runs": [
+      {
+        "run": 0,
+        "wall_s": 9.763,
+        "returncode": 0
+      },
+      {
+        "run": 1,
+        "wall_s": 8.819,
+        "returncode": 0
+      },
+      {
+        "run": 2,
+        "wall_s": 9.011,
+        "returncode": 0
+      }
+    ],
+    "parity_latency_claim_ok": true,
+    "note": "wall clock includes model load+score holdout n=9; cold is first adapter attach"
+  }
+}

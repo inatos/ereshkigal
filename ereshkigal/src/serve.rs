@@ -23,7 +23,7 @@ impl ServeState {
             .clone()
             .or_else(|| std::env::var_os("ERESHKIGAL_GGUF").map(PathBuf::from));
         let runtime = match &gguf_path {
-            Some(p) => Some(load_runtime(Some(p.clone()))?),
+            Some(p) => Some(load_runtime(Some(p.clone()), None)?),
             None => None,
         };
         Ok(Self {
@@ -118,6 +118,66 @@ pub fn serve_stdio(lib_path: &Path, gguf: Option<PathBuf>) -> Result<()> {
         stdout.flush()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    fn decrees_lib() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../decrees")
+    }
+
+    #[test]
+    fn dispatch_stats_without_gguf() {
+        let lib = decrees_lib();
+        if !lib.is_dir() {
+            return;
+        }
+        let state = ServeState::new(&lib, None).expect("load lib");
+        let v = state.dispatch("stats", &json!({}));
+        assert!(v["decrees"].as_u64().unwrap_or(0) >= 1, "{v}");
+        assert_eq!(v["gguf_loaded"], false, "{v}");
+    }
+
+    #[test]
+    fn http_rpc_stats_localhost() {
+        let lib = decrees_lib();
+        if !lib.is_dir() {
+            return;
+        }
+        // Bind an ephemeral port, then hand it to serve_http in a thread.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let lib2 = lib.clone();
+        let handle = thread::spawn(move || {
+            let _ = serve_http(port, &lib2, None);
+        });
+        thread::sleep(Duration::from_millis(150));
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"stats","params":{}}"#;
+        let req = format!(
+            "POST /rpc HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+        let mut resp = String::new();
+        let _ = stream.read_to_string(&mut resp);
+        assert!(resp.contains("\"result\""), "{resp}");
+        assert!(resp.contains("decrees") || resp.contains("gguf"), "{resp}");
+        // serve_http loops forever; detach by dropping the join handle.
+        let _ = Arc::new(handle);
+    }
 }
 
 pub fn serve_http(port: u16, lib_path: &Path, gguf: Option<PathBuf>) -> Result<()> {

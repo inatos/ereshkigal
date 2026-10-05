@@ -29,7 +29,32 @@ def main() -> int:
         print("need --gguf or ERESHKIGAL_GGUF", file=sys.stderr)
         return 2
     bin_path = shutil.which(args.bin) or args.bin
-    cmd = [bin_path, "--gguf", str(args.gguf), "--in", str(args.inp), "--out", str(args.out)]
+    cmd = [
+        bin_path,
+        "--gguf",
+        str(args.gguf),
+        "--input",
+        str(args.inp),
+        "--output",
+        str(args.out),
+        "--no-replay",
+    ]
+    # Prefer 0.6B tokenizer when the GGUF name says so.
+    name = str(args.gguf).lower()
+    if "0.6b" in name or "0_6b" in name:
+        cmd += [
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--revision",
+            "c1899de289a04d12100db370d81485cdf75e47ca",
+        ]
+    elif "3.5-4b" in name or "qwen35" in name or "4b" in name:
+        cmd += [
+            "--model",
+            "Qwen/Qwen3.5-4B",
+            "--revision",
+            "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+        ]
     env = os.environ.copy()
     print("teacher", " ".join(cmd), "N_GPU_LAYERS=" + env.get("N_GPU_LAYERS", "0"))
     r = subprocess.run(cmd, env=env)

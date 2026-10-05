@@ -1,0 +1,8 @@
+{
+  "peft": "/home/inatos/Documents/_Projects/Betwixt/betwixt_engine/tools/ereshkigal/packs/qwen3-0.6b-lora-dev",
+  "outfile": "/home/inatos/Documents/_Projects/Betwixt/betwixt_engine/.wordkeep/models/qwen3-0.6b-lora-dev.gguf",
+  "sha256": "bee94a5067f064f96307b77fdefdfac460cbeb038cae2e48a6932a2fe1d844dd",
+  "bytes": 9190880,
+  "converter_rev": "7049ff0cbeb1f5ead231de4522af6b75d8d773c0",
+  "gate_pass": true
+}

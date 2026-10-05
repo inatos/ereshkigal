@@ -1,0 +1,67 @@
+{
+  "ts": "2026-10-05T23:26:34Z",
+  "slug": "semif-postgate-handoff",
+  "before": {
+    "holdout_n": 9,
+    "bare_BA": 0.4286,
+    "adapter_BA_n9": 1.0,
+    "n_seq_max_effective": 1,
+    "adapter_scale": 1.0,
+    "batch_path": "serial decide_one",
+    "dashboard_timing": "raw \u00b5s",
+    "shared_state_s2": "adapter \u2192 no (regression)"
+  },
+  "after": {
+    "gold_n": 68,
+    "holdout_n": 16,
+    "train_n": 52,
+    "gguf_holdout_BA": 0.9524,
+    "gguf_holdout_acc": 0.9375,
+    "peft_holdout_BA": 0.8929,
+    "adapter_scale": 1.5,
+    "temperature_applied": 1.0,
+    "n_seq_max_config": 32,
+    "n_seq_max_live": 32,
+    "batch_path": "wavefront score_batch\u2192CPU\u2192verify",
+    "dashboard_timing": "Wall Time ms",
+    "shared_state": {
+      "s1": "yes",
+      "s2": "yes",
+      "s3": "no",
+      "pass": true
+    },
+    "shared_bench": {
+      "argmax_agreement": 1.0,
+      "speedup_score": 1.387,
+      "speedup_wall": 1.112
+    },
+    "live_reload": {
+      "warm": true,
+      "adapter_loaded": true,
+      "adapter_scale": 1.5,
+      "temperature": 1.0,
+      "cold_load_ms": 61901,
+      "handoff_warm_us": 140,
+      "batch_shared_state": {
+        "s1": "yes",
+        "s2": "yes",
+        "s3": "no",
+        "batch_us": 234592
+      }
+    }
+  },
+  "deltas": {
+    "BA_bare_to_postgate_holdout16": 0.5238,
+    "holdout_growth": "9 \u2192 16 (+7 never-trained)",
+    "n_seq_max": "effective 1 (clamp bug) \u2192 32",
+    "shared_score_speedup": 1.387
+  },
+  "validation": {
+    "wordkeep_config_tests": "13/13 (reload 2026-10-05T23:28Z)",
+    "wordkeep_semif_tests": "11/11 (reload 2026-10-05T23:28Z)",
+    "adapter_shared_bench": "ok",
+    "bash_n_adapter_shared_bench": true,
+    "mcp_batch_shared_state": "PASS (pre-kill; MCP down during handoff commit)",
+    "post_reload_unit_tests": "ok"
+  }
+}

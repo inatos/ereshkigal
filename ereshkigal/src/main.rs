@@ -49,6 +49,14 @@ struct Cli {
     #[arg(long, env = "ERESHKIGAL_GGUF", global = true)]
     gguf: Option<PathBuf>,
 
+    /// Optional LoRA adapter GGUF (draft student). Env: ERESHKIGAL_ADAPTER.
+    #[arg(long, env = "ERESHKIGAL_ADAPTER", global = true)]
+    adapter: Option<PathBuf>,
+
+    /// LoRA adapter scale (default 1.0). Env: ERESHKIGAL_ADAPTER_SCALE.
+    #[arg(long, env = "ERESHKIGAL_ADAPTER_SCALE", default_value_t = 1.0, global = true)]
+    adapter_scale: f32,
+
     /// JSONL decisions input
     #[arg(long, global = true)]
     input: Option<PathBuf>,
@@ -221,7 +229,9 @@ fn main() -> Result<()> {
                 n_gpu_layers: cli.n_gpu_layers,
                 n_seq_max: cli.n_seq_max,
                 embeddings: false,
+                // Cascade verify path: never attach student LoRA.
                 adapter: None,
+                adapter_scale: 1.0,
             },
             cli.prompt_version.clone(),
             draft_only,
@@ -262,7 +272,12 @@ fn run_score(cli: Cli) -> Result<()> {
         n_gpu_layers: cli.n_gpu_layers,
         n_seq_max: cli.n_seq_max,
         embeddings: false,
-        adapter: None,
+        adapter: cli.adapter.clone(),
+        adapter_scale: if cli.adapter_scale.is_finite() && cli.adapter_scale > 0.0 {
+            cli.adapter_scale
+        } else {
+            1.0
+        },
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 

@@ -44,6 +44,8 @@ enum Cmd {
         state: String,
         #[arg(long)]
         gguf: Option<PathBuf>,
+        #[arg(long)]
+        adapter: Option<PathBuf>,
     },
     Run {
         #[arg(long)]
@@ -54,12 +56,16 @@ enum Cmd {
         state: String,
         #[arg(long)]
         gguf: Option<PathBuf>,
+        #[arg(long)]
+        adapter: Option<PathBuf>,
     },
     Test {
         #[arg(long, default_value = "decrees")]
         lib: PathBuf,
         #[arg(long)]
         gguf: Option<PathBuf>,
+        #[arg(long)]
+        adapter: Option<PathBuf>,
         #[arg(long)]
         fit: bool,
         #[arg(long, default_value = "test")]
@@ -82,6 +88,8 @@ enum Cmd {
         lib: PathBuf,
         #[arg(long)]
         gguf: Option<PathBuf>,
+        #[arg(long)]
+        adapter: Option<PathBuf>,
     },
     Lsp,
     Explain {
@@ -93,6 +101,8 @@ enum Cmd {
         state: String,
         #[arg(long)]
         gguf: Option<PathBuf>,
+        #[arg(long)]
+        adapter: Option<PathBuf>,
     },
     Optimize {
         #[arg(long)]
@@ -166,9 +176,10 @@ fn main() -> Result<()> {
             decree,
             state,
             gguf,
+            adapter,
         } => {
             let library = Library::load(&lib)?;
-            let mut rt = load_runtime(gguf)?;
+            let mut rt = load_runtime(gguf, adapter)?;
             let v: Value = serde_json::from_str(&state).unwrap_or(json!(state));
             let d = rt.decide(&library, &decree, &v)?;
             serde_json::to_writer_pretty(std::io::stdout(), &d)?;
@@ -179,9 +190,10 @@ fn main() -> Result<()> {
             program,
             state,
             gguf,
+            adapter,
         } => {
             let library = Library::load(&lib)?;
-            let mut rt = load_runtime(gguf)?;
+            let mut rt = load_runtime(gguf, adapter)?;
             let v: Value = serde_json::from_str(&state).unwrap_or(json!(state));
             let out = rt.run(&library, &program, &v)?;
             serde_json::to_writer_pretty(std::io::stdout(), &out)?;
@@ -190,10 +202,11 @@ fn main() -> Result<()> {
         Cmd::Test {
             lib,
             gguf,
+            adapter,
             fit,
             split,
             locked,
-        } => run_test(&lib, gguf, fit, &split, locked)?,
+        } => run_test(&lib, gguf, adapter, fit, &split, locked)?,
         Cmd::Lock { lib, out } => {
             let library = Library::load(&lib)?;
             let tmpl = ereshkigal_core::template::render_chat(
@@ -215,7 +228,10 @@ fn main() -> Result<()> {
             lf.save(&out)?;
             println!("wrote {}", out.display());
         }
-        Cmd::Serve { stdio, http, lib, gguf } => {
+        Cmd::Serve { stdio, http, lib, gguf, adapter } => {
+            if let Some(ref a) = adapter {
+                std::env::set_var("ERESHKIGAL_ADAPTER", a);
+            }
             if let Some(port) = http {
                 serve::serve_http(port, &lib, gguf)?;
             } else {
@@ -229,9 +245,10 @@ fn main() -> Result<()> {
             decree,
             state,
             gguf,
+            adapter,
         } => {
             let library = Library::load(&lib)?;
-            let mut rt = load_runtime(gguf)?;
+            let mut rt = load_runtime(gguf, adapter)?;
             let v: Value = serde_json::from_str(&state).unwrap_or(json!(state));
             let base = rt.decide(&library, &decree, &v)?;
             println!("base choice={:?} margin={:.3}", base.choice, base.margin);
@@ -386,10 +403,18 @@ fn tokenizer_for_gguf(gguf: &Path) -> (String, String) {
     }
 }
 
-pub(crate) fn load_runtime(gguf: Option<PathBuf>) -> Result<Runtime> {
+pub(crate) fn load_runtime(gguf: Option<PathBuf>, adapter: Option<PathBuf>) -> Result<Runtime> {
     let gguf = gguf
         .or_else(|| std::env::var_os("ERESHKIGAL_GGUF").map(PathBuf::from))
         .ok_or_else(|| anyhow::anyhow!("--gguf or ERESHKIGAL_GGUF required"))?;
+    let adapter = adapter
+        .or_else(|| std::env::var_os("ERESHKIGAL_ADAPTER").map(PathBuf::from))
+        .filter(|p| !p.as_os_str().is_empty());
+    if let Some(ref p) = adapter {
+        if !p.is_file() {
+            bail!("adapter not found: {}", p.display());
+        }
+    }
     let (tok_src, tok_rev) = tokenizer_for_gguf(&gguf);
     let threads = std::thread::available_parallelism()
         .map(|n| n.get() as i32)
@@ -407,13 +432,25 @@ pub(crate) fn load_runtime(gguf: Option<PathBuf>) -> Result<Runtime> {
         n_gpu_layers,
         n_seq_max: 8,
         embeddings: false,
-        adapter: None,
+        adapter,
+        adapter_scale: std::env::var("ERESHKIGAL_ADAPTER_SCALE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|s: &f32| s.is_finite() && *s > 0.0)
+            .unwrap_or(1.0),
     })
     .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(Runtime::new(Scorer::new(engine, tokenizer)))
 }
 
-fn run_test(lib: &Path, gguf: Option<PathBuf>, fit: bool, split: &str, locked: bool) -> Result<()> {
+fn run_test(
+    lib: &Path,
+    gguf: Option<PathBuf>,
+    adapter: Option<PathBuf>,
+    fit: bool,
+    split: &str,
+    locked: bool,
+) -> Result<()> {
     let library = Library::load(lib)?;
     if locked {
         if Path::new("ereshkigal.lock").is_file() {
@@ -437,7 +474,7 @@ fn run_test(lib: &Path, gguf: Option<PathBuf>, fit: bool, split: &str, locked: b
         println!("offline tests matching split={split}: {n} (provide --gguf to score)");
         return Ok(());
     }
-    let mut rt = load_runtime(gguf)?;
+    let mut rt = load_runtime(gguf, adapter)?;
     let summary = score_library_tests(&mut rt, &library, split)?;
     if fit {
         // Re-score logits for temperature fit (same rows as summary).
@@ -781,4 +818,34 @@ fn run_lsp() -> Result<()> {
     }
     io_threads.join().map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod lsp_helper_tests {
+    use super::{completion_items, hover_markdown};
+
+    const SAMPLE: &str = r#"
+recipe direct-options-v1
+
+decree route_queue "Which queue should handle this request?" {
+  account_access "Account access."
+  billing "Billing."
+}
+"#;
+
+    #[test]
+    fn completion_offers_keywords_and_decree_name() {
+        let items = completion_items(SAMPLE);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"decree"), "{labels:?}");
+        assert!(labels.contains(&"route_queue"), "{labels:?}");
+    }
+
+    #[test]
+    fn hover_shows_question_and_options() {
+        let md = hover_markdown(SAMPLE, "route_queue").expect("hover");
+        assert!(md.contains("route_queue"), "{md}");
+        assert!(md.contains("Which queue"), "{md}");
+        assert!(md.contains("account_access"), "{md}");
+    }
 }

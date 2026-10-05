@@ -112,6 +112,7 @@ fn gguf_direct_serial_shared_parity() {
         n_seq_max: 8,
         embeddings: false,
         adapter: None,
+        adapter_scale: 1.0,
     })
     .expect("load engine");
     let mut scorer = Scorer::new(engine, tokenizer);

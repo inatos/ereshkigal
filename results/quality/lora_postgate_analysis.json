@@ -1,0 +1,107 @@
+{
+  "ts": "2026-10-05T21:12:52Z",
+  "gate": {
+    "BA": 1.0,
+    "ECE": 0.0991,
+    "n_holdout": 9,
+    "n_gold": 52,
+    "prompt": "direct-options-v1"
+  },
+  "adapter_vs_bare_gguf": {
+    "bare_gguf": {
+      "n": 9,
+      "BA": 0.4286,
+      "ECE": 0.5062,
+      "accuracy": 0.4444,
+      "by_family": {
+        "routing": 0.5,
+        "ordinal": 0.0,
+        "multilabel": 1.0,
+        "oos": 0.0,
+        "tree": 1.0,
+        "contrast": 0.0,
+        "policy": 0.5
+      }
+    },
+    "adapter_gguf": {
+      "n": 9,
+      "BA": 1.0,
+      "ECE": 0.0838,
+      "accuracy": 1.0,
+      "by_family": {
+        "routing": 1.0,
+        "ordinal": 1.0,
+        "multilabel": 1.0,
+        "oos": 1.0,
+        "tree": 1.0,
+        "contrast": 1.0,
+        "policy": 1.0
+      }
+    },
+    "peft": {
+      "n": 9,
+      "BA": 1.0,
+      "ECE": 0.0991,
+      "accuracy": 1.0
+    },
+    "delta_BA_adapter_minus_bare": 0.5714,
+    "delta_ECE_adapter_minus_bare": -0.4224
+  },
+  "parity": {
+    "argmax_agreement": 1.0,
+    "max_abs_delta_p": 0.127533,
+    "latency_claim_ok": true
+  },
+  "attach_latency": {
+    "cold_adapter_attach_s": 9.763,
+    "warm_adapter_repeats_s": [
+      8.819,
+      9.011
+    ],
+    "baseline_no_adapter_s": 10.238
+  },
+  "live_mcp": {
+    "adapter_loaded": true,
+    "adapter": "/home/inatos/Documents/_Projects/Betwixt/betwixt_engine/.wordkeep/models/qwen3-0.6b-lora-dev.gguf",
+    "gguf_verify_lazy": true,
+    "gguf_verify_loaded": true,
+    "cold_load_ms": 6019
+  },
+  "enhancements": [
+    {
+      "id": "oof-temperature",
+      "priority": "high",
+      "why": "ECE 0.08\u2192~0.03 in-sample with T\u22480.3; plan already wants grouped OOF T after BA gate"
+    },
+    {
+      "id": "true-wavefront-batch",
+      "priority": "med",
+      "why": "batch still serial decide_one_at; score_batch trait unused"
+    },
+    {
+      "id": "holdout-growth",
+      "priority": "med",
+      "why": "BA=1.0 on n=9 is fragile; expand holdout families without leaking train IDs"
+    },
+    {
+      "id": "label-new-train-teacher",
+      "priority": "med",
+      "why": "22 new gold rows lack 4B soft labels \u2014 KL only covers original 30"
+    },
+    {
+      "id": "adapter-scale-sweep",
+      "priority": "low",
+      "why": "scale fixed at 1.0; plan deferred tuning"
+    },
+    {
+      "id": "debias-zero-clone",
+      "priority": "low",
+      "why": "permute still clones OptionSpec for k>0"
+    },
+    {
+      "id": "shared-suffix-adapter-microbench",
+      "priority": "low",
+      "why": "measure shared-mode speedup with adapter attached"
+    }
+  ]
+}

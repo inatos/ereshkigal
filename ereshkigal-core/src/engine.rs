@@ -46,6 +46,8 @@ pub struct EngineConfig {
     pub n_seq_max: u32,
     pub embeddings: bool,
     pub adapter: Option<PathBuf>,
+    /// LoRA adapter strength passed to `lora_adapter_set` (default 1.0).
+    pub adapter_scale: f32,
 }
 
 /// Process-scoped llama.cpp scorer. The model is leaked for a `'static` context lifetime
@@ -98,10 +100,15 @@ impl EngineOwned {
             .map_err(|e| Error::Engine(format!("create context: {e}")))?;
 
         if let Some(adapter_path) = &cfg.adapter {
+            let scale = if cfg.adapter_scale.is_finite() && cfg.adapter_scale > 0.0 {
+                cfg.adapter_scale
+            } else {
+                1.0
+            };
             let mut adapter = model
                 .lora_adapter_init(adapter_path)
                 .map_err(|e| Error::Engine(format!("lora_adapter_init: {e}")))?;
-            ctx.lora_adapter_set(&mut adapter, 1.0)
+            ctx.lora_adapter_set(&mut adapter, scale)
                 .map_err(|e| Error::Engine(format!("lora_adapter_set: {e}")))?;
             Box::leak(Box::new(adapter));
         }
@@ -410,6 +417,7 @@ mod tests {
             n_seq_max: 1,
             embeddings: false,
             adapter: None,
+            adapter_scale: 1.0,
         };
         let (a, _) = EngineOwned::load(base.clone()).expect("first engine load");
         let mut cpu = base;

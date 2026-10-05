@@ -1,0 +1,38 @@
+{
+  "train_ids": [
+    "dg-route-8-2",
+    "dg-route-8-3",
+    "dg-route-8-4",
+    "dg-sev-1",
+    "dg-sev-3",
+    "dg-sev-4",
+    "dg-ml-1",
+    "dg-ml-3",
+    "dg-ml-4",
+    "dg-oos-1",
+    "dg-oos-2",
+    "dg-oos-3",
+    "dg-tree-1",
+    "dg-tree-2",
+    "dg-tree-4",
+    "dg-contrast-1",
+    "dg-contrast-2",
+    "dg-contrast-4",
+    "dg-policy-1",
+    "dg-policy-4",
+    "dg-policy-5"
+  ],
+  "holdout_ids": [
+    "dg-route-8-1",
+    "dg-route-8-5",
+    "dg-sev-2",
+    "dg-ml-2",
+    "dg-oos-4",
+    "dg-tree-3",
+    "dg-contrast-3",
+    "dg-policy-2",
+    "dg-policy-3"
+  ],
+  "seed": 7,
+  "n": 30
+}

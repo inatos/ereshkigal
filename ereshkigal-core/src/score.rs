@@ -15,6 +15,8 @@ pub struct Scorer {
     serial: SerialCache,
     replay: ReplayCache,
     radix: PrefixRadix,
+    /// Cached GGUF token ids for answer letters A..=P (load-once).
+    letter_token_ids: Option<Vec<i32>>,
     pub prompt_version: String,
     pub replay_enabled: bool,
     pub radix_enabled: bool,
@@ -29,6 +31,24 @@ struct SerialCache {
 impl Scorer {
     pub fn new(engine: EngineOwned, tokenizer: ReferenceTokenizer) -> Self {
         let max_tokens = engine.meta.max_prompt_tokens;
+        // Cache single-letter GGUF token ids once (A..=P) — avoids per-row prompt+letter retokenize.
+        let mut letter_token_ids = Vec::with_capacity(16);
+        for letter in crate::types::LETTERS.chars().take(16) {
+            let s = letter.to_string();
+            if let Ok(toks) = engine.gguf_tokenize(&s) {
+                if let Some(&last) = toks.last() {
+                    letter_token_ids.push(last);
+                    continue;
+                }
+            }
+            letter_token_ids.clear();
+            break;
+        }
+        let letter_token_ids = if letter_token_ids.len() == 16 {
+            Some(letter_token_ids)
+        } else {
+            None
+        };
         Self {
             engine,
             tokenizer,
@@ -39,6 +59,7 @@ impl Scorer {
             },
             replay: ReplayCache::default(),
             radix: PrefixRadix::default(),
+            letter_token_ids,
             prompt_version: PROMPT_VERSION.to_string(),
             replay_enabled: true,
             radix_enabled: true,
@@ -64,13 +85,24 @@ impl Scorer {
             )));
         }
         let _ = letter_gbnf(row.options.len())?;
-        let mut letter_ids = Vec::with_capacity(enc.slots.len());
-        for letter in crate::types::LETTERS.chars().take(enc.slots.len()) {
-            let with = self.engine.gguf_tokenize(&format!("{}{letter}", enc.prompt))?;
-            let last = with.last().copied().ok_or_else(|| {
-                Error::Validation(format!("GGUF produced no token for letter {letter}"))
-            })?;
-            letter_ids.push(last);
+        let n = enc.slots.len();
+        let mut letter_ids: Vec<i32> = if let Some(cached) = &self.letter_token_ids {
+            cached.iter().copied().take(n).collect()
+        } else {
+            Vec::new()
+        };
+        if letter_ids.len() != n || slots_match_letters(&enc.slots, &letter_ids).is_err() {
+            // Fall back to prompt+letter last-token (BPE context may differ from lone letter).
+            letter_ids.clear();
+            for letter in crate::types::LETTERS.chars().take(n) {
+                let with = self
+                    .engine
+                    .gguf_tokenize(&format!("{}{letter}", enc.prompt))?;
+                let last = with.last().copied().ok_or_else(|| {
+                    Error::Validation(format!("GGUF produced no token for letter {letter}"))
+                })?;
+                letter_ids.push(last);
+            }
         }
         slots_match_letters(&enc.slots, &letter_ids)?;
         Ok(enc)

@@ -1,12 +1,20 @@
 [build-system]
-requires = ["maturin>=1.7,<2"]
+requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
 name = "ereshkigal"
 version = "0.1.0"
+description = "Python bindings for Ereshkigal letter-logit semantic decisions"
 requires-python = ">=3.10"
+license = { text = "MIT" }
+classifiers = [
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
 
 [tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "ereshkigal"
 manifest-path = "Cargo.toml"
 python-source = "python"

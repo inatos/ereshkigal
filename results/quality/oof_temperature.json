@@ -1,0 +1,18 @@
+{
+  "folds": 5,
+  "mean_temperature_oof": 0.05,
+  "global_temperature": 0.05,
+  "applied_temperature": 1.0,
+  "ece_t1_oof": 0.0297,
+  "ece_calibrated_oof": 0.0,
+  "fold_temperatures": [
+    0.05,
+    0.05,
+    0.05,
+    0.05,
+    0.05
+  ],
+  "n_train_scored": 43,
+  "adapter_scale": 1.5,
+  "note": "grouped OOF by group_id; mean fold T hit 0.05 floor (train memorization); applied T kept at 1.0 (argmax-invariant; ECE@T1 primary). Pin semif.temperature=1.0"
+}

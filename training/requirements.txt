@@ -1,0 +1,17 @@
+# Pascal (sm_61) / cu118 pin set — keep torch 2.4.1+cu118.
+# Install:
+#   uv pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu118
+# Do NOT upgrade to torch>=2.5 (loses CUDA on 1080 Ti).
+# SemIf A/B stays on ../.venv-semif — never reuse this venv for 1e-6 gates.
+#
+# transformers>=4.51 needed for Qwen3; 4.51.3 still imports on torch 2.4.1.
+# Avoid transformers>=5 / newest peft (NameError nn when torch<2.5).
+
+torch==2.4.1+cu118
+transformers==4.51.3
+peft==0.13.2
+accelerate==1.1.1
+safetensors==0.4.5
+sentencepiece==0.2.0
+protobuf>=4.25,<6
+numpy>=1.26,<2.2
