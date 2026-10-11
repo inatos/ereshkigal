@@ -1,0 +1,67 @@
+schema = "ereshkigal.decree/v1"
+recipe = "direct-options-v1"
+
+# Optical Compression Tier (OCT) policy — when to prefer lossy vision skim vs exact text.
+# Wordkeep knowledge_search + SemIf consult this shape; heuristic scorer can decide without GGUF.
+
+[decrees.oct_use_optical]
+question = "Should this retrieval use the Optical Compression Tier skim?"
+kind = "enum"
+options = [
+  { id = "optical", description = "Use OCT PNG + OCR decode at ≤10× with exact fallback available." },
+  { id = "exact", description = "Stay on exact text path (signatures, contracts, ratio over cap, or peer down without glyph path)." },
+  { id = "fallback_exact", description = "Attempted optical but must attach exact text (precision below gate)." },
+]
+abstain = { coverage = 0.75 }
+on_abstain = "return"
+
+[[decrees.oct_use_optical.tests]]
+state = "Prose knowledge hit, estimated ratio 7.2x, peer healthy, not a code signature."
+expect = "optical"
+group = "oct-1"
+split = "dev"
+
+[[decrees.oct_use_optical.tests]]
+state = "Hit is a C++ function signature and contract; rollback-sensitive API."
+expect = "exact"
+group = "oct-1"
+split = "dev"
+
+[[decrees.oct_use_optical.tests]]
+state = "Estimated ratio 18x exceeds max_ratio 10; agent asked for optical:true."
+expect = "exact"
+group = "oct-1"
+split = "dev"
+
+[[decrees.oct_use_optical.tests]]
+state = "Optical decode precision 0.91 below 0.97 gate after glyph-OCR; exact text available."
+expect = "fallback_exact"
+group = "oct-1"
+split = "dev"
+
+[decrees.oct_ratio_cap]
+question = "Which compression ratio cap applies?"
+kind = "enum"
+options = [
+  { id = "cap_10", description = "Default promote-able cap (≤10×, near-lossless)." },
+  { id = "cap_20", description = "Aggressive triage only (forgetful MAS / stale notes); never for code." },
+  { id = "cap_forbidden", description = "Optical forbidden for this content class." },
+]
+
+[[decrees.oct_ratio_cap.tests]]
+state = "knowledge_search prose docs, optical:true, default policy."
+expect = "cap_10"
+group = "oct-ratio-1"
+split = "dev"
+
+[[decrees.oct_ratio_cap.tests]]
+state = "Stale MAS blackboard history marked forgetful; agent set optical_max_ratio 20."
+expect = "cap_20"
+group = "oct-ratio-1"
+split = "dev"
+
+[[decrees.oct_ratio_cap.tests]]
+state = "Symbol signature / type_layout exact contract."
+expect = "cap_forbidden"
+group = "oct-ratio-1"
+split = "dev"
