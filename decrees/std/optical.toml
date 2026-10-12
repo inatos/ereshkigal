@@ -5,11 +5,14 @@ recipe = "direct-options-v1"
 # Wordkeep knowledge_search + SemIf consult this shape; heuristic scorer can decide without GGUF.
 
 [decrees.oct_use_optical]
-question = "Should this retrieval use the Optical Compression Tier skim?"
+question = "Should this retrieval/decide use Optical Compression Tier, and which modality?"
 kind = "enum"
 options = [
-  { id = "optical", description = "Use OCT PNG + OCR decode at ≤10× with exact fallback available." },
-  { id = "exact", description = "Stay on exact text path (signatures, contracts, ratio over cap, or peer down without glyph path)." },
+  { id = "optical", description = "Use OCT PNG + OCR decode at ≤10× with exact fallback available (glyph or GPU)." },
+  { id = "vision", description = "Vision-first skim (PNG for VLM); OCR decode optional." },
+  { id = "hybrid", description = "Visual draft then exact-text verify/commit (semantic_decide visual_evidence)." },
+  { id = "text", description = "Stay on exact text / heuristic/GGUF decide without optics." },
+  { id = "exact", description = "Force exact text path (signatures, contracts, ratio over cap)." },
   { id = "fallback_exact", description = "Attempted optical but must attach exact text (precision below gate)." },
 ]
 abstain = { coverage = 0.75 }
@@ -17,7 +20,7 @@ on_abstain = "return"
 
 [[decrees.oct_use_optical.tests]]
 state = "Prose knowledge hit, estimated ratio 7.2x, peer healthy, not a code signature."
-expect = "optical"
+expect = "hybrid"
 group = "oct-1"
 split = "dev"
 
@@ -36,6 +39,18 @@ split = "dev"
 [[decrees.oct_use_optical.tests]]
 state = "Optical decode precision 0.91 below 0.97 gate after glyph-OCR; exact text available."
 expect = "fallback_exact"
+group = "oct-1"
+split = "dev"
+
+[[decrees.oct_use_optical.tests]]
+state = "semantic_decide with visual_evidence protocol_version 1, clipped=false, peer down — local glyph hybrid."
+expect = "hybrid"
+group = "oct-1"
+split = "dev"
+
+[[decrees.oct_use_optical.tests]]
+state = "visual_evidence clipped=true; must abstain vision and escalate to exact text SoT."
+expect = "exact"
 group = "oct-1"
 split = "dev"
 
