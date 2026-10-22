@@ -1,0 +1,99 @@
+schema = "ereshkigal.decree/v1"
+recipe = "direct-options-v1"
+
+[decrees.promote_hold]
+question = "Does the evidence support promoting this change?"
+kind = "enum"
+options = [
+  { id = "promote", description = "Evidence is enough to promote the change." },
+  { id = "hold", description = "Evidence says to hold the change." },
+  { id = "insufficient", description = "The evidence is insufficient to decide." },
+]
+abstain = { coverage = 0.8 }
+on_abstain = "return"
+
+[[decrees.promote_hold.tests]]
+state = "Cast metrics passed. Filmstrip read found no contradictions. The author accepted the take."
+expect = "promote"
+group = "betwixt-promote-1"
+split = "dev"
+
+[[decrees.promote_hold.tests]]
+state = "A test already fails on the main path. No new measurement contradicts that failure."
+expect = "hold"
+group = "betwixt-promote-1"
+split = "dev"
+
+[[decrees.promote_hold.tests]]
+state = "The change is described only as a feeling. No test, capture, or read was recorded."
+expect = "insufficient"
+group = "betwixt-promote-1"
+split = "dev"
+
+[decrees.compute_peer]
+question = "Where should this compact compute request run?"
+kind = "enum"
+options = [
+  { id = "remote_copper", description = "The remote peer is healthy and should take the request." },
+  { id = "local_host", description = "Run on the local host. The peer is down, busy, or the work is a frame gate." },
+  { id = "insufficient", description = "Peer health was not checked." },
+]
+abstain = { coverage = 0.8 }
+on_abstain = "return"
+
+[[decrees.compute_peer.tests]]
+state = "copper_status peer up, infer daemon up, lane ready, cooldown false. The request is a short score, not a frame timing gate."
+expect = "remote_copper"
+group = "betwixt-peer-1"
+split = "dev"
+
+[[decrees.compute_peer.tests]]
+state = "The peer is down. This is a desktop frame timing capture and must stay on the local display."
+expect = "local_host"
+group = "betwixt-peer-1"
+split = "dev"
+
+[[decrees.compute_peer.tests]]
+state = "No health file was read. Nobody checked whether the peer is up."
+expect = "insufficient"
+group = "betwixt-peer-1"
+split = "dev"
+
+[decrees.capture_named]
+question = "Did this capture name its profiler zones?"
+kind = "enum"
+options = [
+  { id = "zones_named", description = "The zone table has named rows." },
+  { id = "zones_missing", description = "Export failed or the zone table is empty." },
+  { id = "insufficient", description = "No capture report was provided." },
+]
+abstain = { coverage = 0.8 }
+on_abstain = "return"
+
+[[decrees.capture_named.tests]]
+state = "tracy-csvexport exited 0 and the zone table lists PipelineTick and RenderSubmit."
+expect = "zones_named"
+group = "betwixt-capture-1"
+split = "dev"
+
+[[decrees.capture_named.tests]]
+state = "Frames-per-second JSON passed. tracy-csvexport crashed and the zone table is empty."
+expect = "zones_missing"
+group = "betwixt-capture-1"
+split = "dev"
+
+[[decrees.capture_named.tests]]
+state = "No capture file, no export log, and no zone table were attached."
+expect = "insufficient"
+group = "betwixt-capture-1"
+split = "dev"
+
+[programs.capture_proceed]
+nodes = [
+  { id = "named", decree = "capture_named" },
+]
+result = [
+  { when = ["zones_named"], then = "proceed" },
+  { when = ["zones_missing"], then = "hold" },
+  { when = ["insufficient"], then = "hold" },
+]
