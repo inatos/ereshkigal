@@ -88,6 +88,150 @@ expect = "insufficient"
 group = "betwixt-capture-1"
 split = "dev"
 
+[decrees.memory_salience]
+question = "What should Elucifia do with this exchange?"
+kind = "enum"
+options = [
+  { id = "promote_semantic", description = "The exchange states canon or a lasting fact. Write semantic memory." },
+  { id = "record_episodic", description = "The exchange is a session decision worth an episodic note." },
+  { id = "ephemeral_skip", description = "Greeting, thanks, or chatter. Do not write Lorekeep." },
+]
+abstain = { coverage = 0.8 }
+on_abstain = "return"
+
+[[decrees.memory_salience.tests]]
+state = "Inatos confirmed canon: Fulcanus is the Edict master. Record it as a lasting fact."
+expect = "promote_semantic"
+group = "betwixt-memory-1"
+split = "dev"
+
+[[decrees.memory_salience.tests]]
+state = "We decided in this session to keep frame gates on the desktop. Note the decision."
+expect = "record_episodic"
+group = "betwixt-memory-1"
+split = "dev"
+
+[[decrees.memory_salience.tests]]
+state = "The user said thanks. No fact and no decision."
+expect = "ephemeral_skip"
+group = "betwixt-memory-1"
+split = "dev"
+
+[decrees.continuity_check]
+question = "Does this claim agree with the retrieved canon?"
+kind = "enum"
+options = [
+  { id = "consistent", description = "The claim agrees with retrieved canon." },
+  { id = "contradiction_flag", description = "The claim contradicts a pinned fact." },
+  { id = "spoiler_violation", description = "The claim would reveal past the spoiler horizon." },
+  { id = "insufficient", description = "Retrieved canon is not enough to judge." },
+]
+abstain = { coverage = 0.8 }
+on_abstain = "return"
+
+[[decrees.continuity_check.tests]]
+state = "Pinned canon says Fulcanus is the Edict master. The proposed beat says the same."
+expect = "consistent"
+group = "betwixt-continuity-1"
+split = "dev"
+
+[[decrees.continuity_check.tests]]
+state = "Pinned canon says Ehtria is the spelling. The proposed beat spells it Ethria as the only form."
+expect = "contradiction_flag"
+group = "betwixt-continuity-1"
+split = "dev"
+
+[[decrees.continuity_check.tests]]
+state = "Draft horizon is Wispfire chapter 2. The beat reveals a Wispfire chapter 4 secret."
+expect = "spoiler_violation"
+group = "betwixt-continuity-1"
+split = "dev"
+
+[[decrees.continuity_check.tests]]
+state = "No pinned page was retrieved. The beat is only a hunch."
+expect = "insufficient"
+group = "betwixt-continuity-1"
+split = "dev"
+
+[decrees.conduit_route]
+question = "Which existing organ should own this request?"
+kind = "enum"
+options = [
+  { id = "vault_lorekeep", description = "Lore, continuity, or Atheneum prose." },
+  { id = "arte_author", description = "Author or juxtapose feel, look, or sound content." },
+  { id = "akasha_source", description = "Find a CC0 mesh, texture, HDRI, or audio pack." },
+  { id = "palaestra_gpu_job", description = "Train, lift, image, mesh, or speech on the laptop." },
+  { id = "megistus_perf_soak", description = "A measured hitch or frame-time question." },
+  { id = "engine_ecs_edit", description = "A data-oriented engine change with a test." },
+]
+abstain = { coverage = 0.8 }
+on_abstain = "return"
+
+[[decrees.conduit_route.tests]]
+state = "Inatos wants a Wispfire scene checked against the Atheneum before any new fact."
+expect = "vault_lorekeep"
+group = "betwixt-route-1"
+split = "dev"
+
+[[decrees.conduit_route.tests]]
+state = "Author a new impact flash and juxtapose it in Arte. No new downloader."
+expect = "arte_author"
+group = "betwixt-route-1"
+split = "dev"
+
+[[decrees.conduit_route.tests]]
+state = "Need a CC0 lantern mesh that is not already in the repo."
+expect = "akasha_source"
+group = "betwixt-route-1"
+split = "dev"
+
+[[decrees.conduit_route.tests]]
+state = "Train the persona adapter on the laptop GPU and leave frame timing on the desktop."
+expect = "palaestra_gpu_job"
+group = "betwixt-route-1"
+split = "dev"
+
+[[decrees.conduit_route.tests]]
+state = "Spawn motion-soak hitch. Need Tracy zones before any engine edit."
+expect = "megistus_perf_soak"
+group = "betwixt-route-1"
+split = "dev"
+
+[[decrees.conduit_route.tests]]
+state = "Add a cached Flecs query in the movement system and cover it with a unit test."
+expect = "engine_ecs_edit"
+group = "betwixt-route-1"
+split = "dev"
+
+[decrees.lora_curate]
+question = "Should this pair enter Elucifia's training set?"
+kind = "enum"
+options = [
+  { id = "accept_sft", description = "A real reply worth supervised fine-tuning." },
+  { id = "accept_dpo_correction", description = "Inatos rewrote the reply. Keep the preference pair." },
+  { id = "reject_noise_or_stub", description = "Thanks, chatter, or a peer-silent stub." },
+]
+abstain = { coverage = 0.8 }
+on_abstain = "return"
+
+[[decrees.lora_curate.tests]]
+state = "Inatos confirmed canon and Seraphina answered in her own voice. Not a stub."
+expect = "accept_sft"
+group = "betwixt-lora-1"
+split = "dev"
+
+[[decrees.lora_curate.tests]]
+state = "Inatos rewrote the assistant line. Keep the rejected draft and the chosen line."
+expect = "accept_dpo_correction"
+group = "betwixt-lora-1"
+split = "dev"
+
+[[decrees.lora_curate.tests]]
+state = "The assistant said peer silent and did not invent a Gemma answer."
+expect = "reject_noise_or_stub"
+group = "betwixt-lora-1"
+split = "dev"
+
 [programs.capture_proceed]
 nodes = [
   { id = "named", decree = "capture_named" },
