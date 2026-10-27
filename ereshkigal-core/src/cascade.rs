@@ -103,6 +103,90 @@ pub fn draft_agrees_argmax(draft_logits: &[f64], verify_logits: &[f64]) -> Resul
     Ok(argmax(&d) == argmax(&v))
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeculativeTreeOutcome {
+    /// Longest prefix of draft tokens accepted by the verify pass.
+    pub accepted_prefix: usize,
+    pub used_verify: bool,
+    pub source: &'static str,
+}
+
+/// Batched MoE-style speculative tree verify.
+///
+/// `draft_token_ids` is the K-token candidate branch from a resident draft model.
+/// `verify_token_ids` is the MoE (or verify model) argmax sequence for the same
+/// positions in one amortized sweep. Commits the longest matching prefix.
+pub fn speculative_tree_verify(
+    draft_token_ids: &[u32],
+    verify_token_ids: &[u32],
+) -> Result<SpeculativeTreeOutcome> {
+    if draft_token_ids.is_empty() {
+        return Err(Error::Validation(
+            "speculative_tree_verify: empty draft branch".into(),
+        ));
+    }
+    if verify_token_ids.len() != draft_token_ids.len() {
+        return Err(Error::Validation(
+            "speculative_tree_verify: draft and verify lengths differ".into(),
+        ));
+    }
+    let mut accepted = 0usize;
+    for (d, v) in draft_token_ids.iter().zip(verify_token_ids.iter()) {
+        if d == v {
+            accepted += 1;
+        } else {
+            break;
+        }
+    }
+    Ok(SpeculativeTreeOutcome {
+        accepted_prefix: accepted,
+        used_verify: true,
+        source: if accepted == draft_token_ids.len() {
+            "speculative-tree-full"
+        } else if accepted == 0 {
+            "speculative-tree-reject"
+        } else {
+            "speculative-tree-prefix"
+        },
+    })
+}
+
+/// Per-position letter-logit cascade over a speculative tree (option space).
+/// For each draft position, commit draft when margin > tau; else take verify.
+pub fn speculative_tree_cascade(
+    draft_logits_per_step: &[Vec<f64>],
+    verify_logits_per_step: &[Vec<f64>],
+    tau: f64,
+) -> Result<(Vec<CascadeOutcome>, usize)> {
+    if draft_logits_per_step.is_empty() {
+        return Err(Error::Validation(
+            "speculative_tree_cascade: empty draft".into(),
+        ));
+    }
+    if verify_logits_per_step.len() != draft_logits_per_step.len() {
+        return Err(Error::Validation(
+            "speculative_tree_cascade: length mismatch".into(),
+        ));
+    }
+    let mut outs = Vec::with_capacity(draft_logits_per_step.len());
+    let mut accepted = 0usize;
+    for (d, v) in draft_logits_per_step
+        .iter()
+        .zip(verify_logits_per_step.iter())
+    {
+        let out = cascade_select(d, Some(v), tau)?;
+        let agree = draft_agrees_argmax(d, v)?;
+        if agree || !out.used_verify {
+            accepted += 1;
+            outs.push(out);
+        } else {
+            outs.push(out);
+            break;
+        }
+    }
+    Ok((outs, accepted))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +218,31 @@ mod tests {
         let out = cascade_select_conformal(&draft, Some(&verify), q).unwrap();
         assert!(!out.used_verify);
         assert_eq!(out.set_size, 1);
+    }
+
+    #[test]
+    fn speculative_tree_accepts_prefix() {
+        let draft = [1u32, 2, 3, 4, 5];
+        let verify = [1u32, 2, 3, 9, 9];
+        let out = speculative_tree_verify(&draft, &verify).unwrap();
+        assert_eq!(out.accepted_prefix, 3);
+        assert_eq!(out.source, "speculative-tree-prefix");
+    }
+
+    #[test]
+    fn speculative_tree_full_accept() {
+        let ids = [7u32, 8, 9];
+        let out = speculative_tree_verify(&ids, &ids).unwrap();
+        assert_eq!(out.accepted_prefix, 3);
+        assert_eq!(out.source, "speculative-tree-full");
+    }
+
+    #[test]
+    fn speculative_tree_cascade_stops_on_disagree() {
+        let drafts = vec![vec![8.0, 0.0], vec![1.0, 0.9], vec![5.0, 0.1]];
+        let verifies = vec![vec![8.0, 0.0], vec![0.0, 3.0], vec![5.0, 0.1]];
+        let (outs, accepted) = speculative_tree_cascade(&drafts, &verifies, 0.5).unwrap();
+        assert!(accepted >= 1);
+        assert!(!outs.is_empty());
     }
 }

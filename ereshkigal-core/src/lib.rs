@@ -18,7 +18,10 @@ pub mod score;
 pub mod store;
 pub mod tokenizer;
 
-pub use cascade::{cascade_select, cascade_select_conformal, top2_margin, CascadeOutcome};
+pub use cascade::{
+    cascade_select, cascade_select_conformal, draft_agrees_argmax, speculative_tree_cascade,
+    speculative_tree_verify, top2_margin, CascadeOutcome, SpeculativeTreeOutcome,
+};
 pub use engine::{EngineConfig, EngineOwned};
 pub use gbnf::{letter_gbnf, slots_match_letters};
 pub use outline::outline_state;

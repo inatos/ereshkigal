@@ -232,6 +232,42 @@ expect = "reject_noise_or_stub"
 group = "betwixt-lora-1"
 split = "dev"
 
+[decrees.frontier_job_partition]
+question = "How should this frontier / 1M-context request be partitioned across Tifantell and Myridos?"
+kind = "enum"
+options = [
+  { id = "local_semif_fast", description = "Short judgment: keep on local Ereshkigal SemIf (Qwen3-0.6B/4B)." },
+  { id = "myridos_gemma_single", description = "Single-turn chat or mid model: Myridos gemma4:12b/26b via Aeron." },
+  { id = "sharded_moe_dag", description = "Large context or multi-mission: OOM-fenced ModularJobDag + TensorPipe shards." },
+  { id = "hold_oom_risk", description = "Vitals fail the OOM fence; refuse to size the shard." },
+]
+abstain = { coverage = 0.8 }
+on_abstain = "return"
+
+[[decrees.frontier_job_partition.tests]]
+state = "Three option labels, conformal margin high, copper peer up. This is a short promote_hold score, not a frame gate."
+expect = "local_semif_fast"
+group = "betwixt-frontier-1"
+split = "dev"
+
+[[decrees.frontier_job_partition.tests]]
+state = "Peer up, infer daemon up. User wants a normal Seraphina chat reply with gemma4:12b. Context under 8k tokens."
+expect = "myridos_gemma_single"
+group = "betwixt-frontier-1"
+split = "dev"
+
+[[decrees.frontier_job_partition.tests]]
+state = "Request spans 1M tokens of vault plus a multi-mission Anima and Arte CAD probe. MemAvailable and free VRAM clear the OOM fence on both hosts."
+expect = "sharded_moe_dag"
+group = "betwixt-frontier-1"
+split = "dev"
+
+[[decrees.frontier_job_partition.tests]]
+state = "Frontier MoE shard requested but nvidia-smi shows only 1 GiB free VRAM on Tifantell. OOM fence floors are not met."
+expect = "hold_oom_risk"
+group = "betwixt-frontier-1"
+split = "dev"
+
 [programs.capture_proceed]
 nodes = [
   { id = "named", decree = "capture_named" },
