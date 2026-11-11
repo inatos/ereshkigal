@@ -16,6 +16,9 @@ LORA_R="${LORA_R:-16}"
 LORA_ALPHA="${LORA_ALPHA:-32}"
 LORA_TARGETS="${LORA_TARGETS:-q_proj,k_proj,v_proj,o_proj}"
 PROMPT_STYLE="${PROMPT_STYLE:-semif}"
+# bf16 autocast: measured +112% steps/s at identical holdout BA on sm_86.
+# --amp auto degrades to fp16 on Pascal (no bf16 hardware) and to fp32 on CPU.
+AMP="${AMP:-auto}"
 mkdir -p "$(dirname "$TEACHER_OUT")" "$(dirname "$REPORT")" "$LORA_OUT"
 
 PY=python3
@@ -109,6 +112,7 @@ fi
   --lora-alpha "$LORA_ALPHA" \
   --lora-targets "$LORA_TARGETS" \
   --prompt-style "$PROMPT_STYLE" \
+  --amp "$AMP" \
   --permute \
   --split-json "$SPLIT_JSON" \
   ${CPU:+--cpu}

@@ -42,6 +42,28 @@ python train_lora.py --teacher-jsonl teacher_dev_gold.jsonl \
 python train_lora.py ... --steps 8 --cpu
 ```
 
+## Precision / throughput (`--amp`)
+
+Defaults to `auto`: bf16 on sm_80+, else fp16. Measured on the RTX 3080 Ti
+Laptop (sm_86, 400 steps, Qwen3-0.6B, LoRA r16/a32): **+112% steps/s**
+(3.23 -> 6.86) and **-53% wall clock**, with holdout **BA identical at 0.8929**
+and `gate_pass` true both ways. See the Megistus ledger entry for 2026-11-11.
+
+- `--amp off` reproduces the old fp32 path exactly.
+- The letter-logit CE/KL head and all holdout scoring stay **fp32** on purpose,
+  so BA/ECE remain comparable across precisions. Do not "optimise" that away.
+- Pascal (sm_61, 1080 Ti) has no bf16 hardware: `--amp bf16` there resolves to
+  fp16 and records why in `train_status.json` (`amp_resolved`).
+- `train_status.json` carries `amp_requested`, `amp_resolved`, `grad_scaler`,
+  `train_secs`, `timed_steps`, `steps_per_sec`.
+
+Evict a resident Ollama model before a timed run, or the fp32 arm can OOM:
+
+```bash
+curl -s http://127.0.0.1:11434/api/generate \
+  -d '{"model":"gemma4:12b","keep_alive":0}' >/dev/null
+```
+
 ## PEFT → GGUF
 
 Vendored converter (llama.cpp commit matching `llama-cpp-sys-2 0.1.158`):

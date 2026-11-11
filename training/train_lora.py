@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import random
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -47,13 +48,66 @@ def _ba_ece_arrays(y_true: list[int], y_pred: list[int], confs: list[float]) -> 
     return {"n": n, "BA": round(ba, 4), "ECE": round(ece, 4), "accuracy": round(acc, 4)}
 
 
-def freeze_split(gold_rows: list[dict], holdout_frac: float = 1.0 / 3.0, seed: int = 7) -> tuple[list[str], list[str]]:
-    """Family-stratified holdout: ≥1 holdout per family when possible; rest by frac."""
+EVIDENCE_TOKEN_CAP = 384
+
+
+def _approx_tokens(text: str) -> int:
+    return len(str(text).split())
+
+
+def truncate_evidence(text: str, max_tokens: int = EVIDENCE_TOKEN_CAP) -> str:
+    """Cap evidence so SemIf options are never clipped at max_length=768."""
+    words = str(text).split()
+    if len(words) <= max_tokens:
+        return str(text).strip()
+    return " ".join(words[:max_tokens])
+
+
+def freeze_split(
+    gold_rows: list[dict],
+    holdout_frac: float = 1.0 / 3.0,
+    seed: int = 7,
+    lineage_key: str | None = None,
+) -> tuple[list[str], list[str]]:
+    """Family-stratified holdout; optional lineage grouping prevents handoff/ledger leakage.
+
+    When ``lineage_key`` is set (e.g. ``lineage_id``), every row that shares a lineage
+    value is kept entirely in train *or* entirely in holdout.
+    """
     rng = random.Random(seed)
+    if lineage_key:
+        by_lineage: dict[str, list[dict]] = defaultdict(list)
+        for r in gold_rows:
+            lid = str(r.get(lineage_key) or r.get("family") or r.get("id") or "unknown")
+            by_lineage[lid].append(r)
+        lineage_ids = list(by_lineage.keys())
+        rng.shuffle(lineage_ids)
+        hold_lineages: set[str] = set()
+        # At least one lineage per family into holdout when possible.
+        seen_fam: set[str] = set()
+        for lid in lineage_ids:
+            fam = str(by_lineage[lid][0].get("family") or "unknown")
+            if fam not in seen_fam:
+                hold_lineages.add(lid)
+                seen_fam.add(fam)
+        n_hold = max(len(hold_lineages), int(round(len(lineage_ids) * holdout_frac)))
+        for lid in lineage_ids:
+            if len(hold_lineages) >= n_hold:
+                break
+            hold_lineages.add(lid)
+        hold_ids: set[str] = set()
+        for lid in hold_lineages:
+            for r in by_lineage[lid]:
+                hold_ids.add(r["id"])
+        all_ids = [r["id"] for r in gold_rows]
+        hold = [i for i in all_ids if i in hold_ids]
+        train = [i for i in all_ids if i not in hold_ids]
+        return train, hold
+
     by_fam: dict[str, list[dict]] = defaultdict(list)
     for r in gold_rows:
         by_fam[str(r.get("family") or "unknown")].append(r)
-    hold_ids: set[str] = set()
+    hold_ids = set()
     for fam, items in by_fam.items():
         items = list(items)
         rng.shuffle(items)
@@ -104,11 +158,16 @@ _PROMPT_STYLE = "semif"
 
 
 def _prompt_from_row(row: dict) -> str:
-    """Render student prompt; default SemIf matches Rust / GGUF scorer."""
+    """Render student prompt; default SemIf matches Rust / GGUF scorer.
+
+    Evidence is truncated to ``EVIDENCE_TOKEN_CAP`` *before* options so
+    ``max_length=768`` never clips option letters on Pascal FP32.
+    """
+    state = truncate_evidence(row.get("state", ""), EVIDENCE_TOKEN_CAP)
     if _PROMPT_STYLE == "compact":
         lines = [
             f"Question: {row.get('question', '')}",
-            f"State: {row.get('state', '')}",
+            f"State: {state}",
             "Options:",
         ]
         for i, o in enumerate(row.get("options") or []):
@@ -125,7 +184,7 @@ def _prompt_from_row(row: dict) -> str:
             }
         )
     payload = {
-        "evidence": row.get("state", ""),
+        "evidence": state,
         "criterion": row.get("question", ""),
         "options": options,
     }
@@ -213,7 +272,30 @@ def _build_examples(
     return ex
 
 
-def _score_batch(model, tok, device, letter_ids: list[int], rows: list[dict], batch_size: int = 4):
+def _resolve_amp_dtype(torch, device: str, requested: str):
+    """Pick the autocast dtype, degrading gracefully where bf16 has no hardware.
+
+    bf16 needs sm_80+ (Ampere). The pinned venv is also used on a Pascal 1080 Ti
+    (sm_61), which has no bf16 hardware, so asking for bf16 there would not give
+    the tensor rate it asks for. Resolve once, record the choice in
+    train_status.json, and keep the loss head in fp32 regardless.
+    """
+    if requested == "off" or device == "cpu":
+        return None, "fp32 (no autocast)" if device != "cpu" else "fp32 (cpu)"
+    if requested == "fp16":
+        return torch.float16, "fp16"
+    # bf16 / auto both want bf16 when it is real hardware.
+    try:
+        if torch.cuda.is_bf16_supported():
+            return torch.bfloat16, "bf16" if requested == "bf16" else "bf16 (auto)"
+    except Exception:
+        pass
+    return torch.float16, "fp16 (bf16 unsupported on this GPU)"
+
+
+def _score_batch(
+    model, tok, device, letter_ids: list[int], rows: list[dict], batch_size: int = 4, amp_dtype=None
+):
     """Batched letter-logit scoring. Returns parallel pred/conf/label arrays."""
     import torch
 
@@ -238,7 +320,15 @@ def _score_batch(model, tok, device, letter_ids: list[int], rows: list[dict], ba
         )
         enc = {k: v.to(device) for k, v in enc.items()}
         with torch.no_grad():
-            logits = model(**enc).logits  # [B, T, V]
+            # Autocast only the forward matmuls; score the letter logits in
+            # fp32 so BA/ECE stay comparable across precisions.
+            with torch.autocast(
+                device_type="cuda",
+                dtype=amp_dtype,
+                enabled=amp_dtype is not None and device == "cuda",
+            ):
+                logits = model(**enc).logits  # [B, T, V]
+            logits = logits.float()
             # Last non-pad position per row.
             attn = enc["attention_mask"]
             last = attn.sum(dim=1) - 1  # [B]
@@ -261,8 +351,35 @@ def main():
     p.add_argument("--student", default="Qwen/Qwen3-0.6B")
     p.add_argument("--teacher-jsonl", type=Path, required=False)
     p.add_argument("--gold", type=Path, help="dev_gold.jsonl for train/holdout")
+    p.add_argument(
+        "--extra-gold",
+        type=Path,
+        action="append",
+        default=[],
+        help="Additional gold JSONL (e.g. ereshkigal_handoff_gold.jsonl); may repeat",
+    )
+    p.add_argument(
+        "--lineage-key",
+        default="lineage_id",
+        help="Group holdout by this field to stop handoff/ledger leakage (empty disables)",
+    )
+    p.add_argument(
+        "--rlsf-weights",
+        action="store_true",
+        help="Weight CE loss by row rlsf_weight / advantage when present",
+    )
     p.add_argument("--out", type=Path, default=Path("packs/qwen3-0.6b-lora"))
     p.add_argument("--cpu", action="store_true")
+    p.add_argument(
+        "--amp",
+        choices=("auto", "bf16", "fp16", "off"),
+        default="auto",
+        help=(
+            "autocast dtype for fwd/bwd. auto = bf16 when the GPU supports it "
+            "else fp16; off = fp32 (old behaviour). Pascal (sm_61) has no bf16 "
+            "and resolves to fp16"
+        ),
+    )
     p.add_argument("--steps", type=int, default=0)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--lora-r", type=int, default=16)
@@ -330,12 +447,35 @@ def main():
     _PROMPT_STYLE = args.prompt_style
 
     gold_rows: list[dict] = []
+    gold_paths: list[Path] = []
     if args.gold and args.gold.is_file():
-        gold_rows = [
-            json.loads(l) for l in args.gold.read_text().splitlines() if l.strip()
-        ]
+        gold_paths.append(args.gold)
+    for extra in args.extra_gold or []:
+        if extra and Path(extra).is_file():
+            gold_paths.append(Path(extra))
+    for path in gold_paths:
+        for line in path.read_text().splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if "id" not in row:
+                continue
+            row.setdefault("split", "dev")
+            if "state" in row:
+                row["state"] = truncate_evidence(row["state"], EVIDENCE_TOKEN_CAP)
+            gold_rows.append(row)
+    if gold_rows:
         assert all(r.get("split") == "dev" for r in gold_rows), "gold must be split=dev"
+    # Deduplicate by id (first wins) so extra-gold does not clobber frozen gold.
+    dedup: dict[str, dict] = {}
+    for r in gold_rows:
+        dedup.setdefault(r["id"], r)
+    gold_rows = list(dedup.values())
     gold_by_id = {r["id"]: r for r in gold_rows}
+    meta["extra_gold"] = [str(p) for p in gold_paths]
+    meta["lineage_key"] = args.lineage_key or None
+    meta["rlsf_weights"] = bool(args.rlsf_weights)
+    meta["evidence_token_cap"] = EVIDENCE_TOKEN_CAP
 
     teacher_rows: list[dict] = []
     if args.teacher_jsonl and args.teacher_jsonl.is_file():
@@ -361,8 +501,20 @@ def main():
                 raise SystemExit(f"frozen holdout IDs missing from gold: {missing}")
             meta["split_source"] = str(args.split_json)
         else:
-            train_ids, hold_ids = freeze_split(gold_rows, seed=args.split_seed)
+            lineage = args.lineage_key.strip() if args.lineage_key else None
+            train_ids, hold_ids = freeze_split(
+                gold_rows, seed=args.split_seed, lineage_key=lineage or None
+            )
             meta["split_source"] = "freeze_split"
+            # Lineage leak guard: no lineage_id in both train and holdout.
+            if lineage:
+                train_l = {
+                    str(gold_by_id[i].get(lineage) or i) for i in train_ids if i in gold_by_id
+                }
+                hold_l = {
+                    str(gold_by_id[i].get(lineage) or i) for i in hold_ids if i in gold_by_id
+                }
+                assert not (train_l & hold_l), "train/holdout lineage overlap"
     meta["train_ids"] = train_ids
     meta["holdout_ids"] = hold_ids
     meta["n_train"] = len(train_ids)
@@ -419,19 +571,27 @@ def main():
 
     device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
     meta["device"] = device
+    amp_dtype, amp_label = _resolve_amp_dtype(torch, device, args.amp)
+    meta["amp_requested"] = args.amp
+    meta["amp_resolved"] = amp_label
     tok = AutoTokenizer.from_pretrained(args.student, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     letter_ids = _letter_id_cache(tok, 16)
 
+    # Weights in the autocast dtype so the matmuls run on the tensor path;
+    # the letter-logit loss head is cast back to fp32 at use.
+    weight_dtype = amp_dtype if amp_dtype is not None else torch.float32
     base = AutoModelForCausalLM.from_pretrained(
-        args.student, torch_dtype=torch.float32, trust_remote_code=True
+        args.student, torch_dtype=weight_dtype, trust_remote_code=True
     )
     base.to(device)
 
     # Unadapted student baseline on holdout (same prompt as student).
     if hold_rows:
-        y_t, y_p, confs = _score_batch(base, tok, device, letter_ids, hold_rows)
+        y_t, y_p, confs = _score_batch(
+            base, tok, device, letter_ids, hold_rows, amp_dtype=amp_dtype
+        )
         meta["unadapted_holdout"] = _ba_ece_arrays(y_t, y_p, confs)
 
     if args.init_adapter:
@@ -474,6 +634,16 @@ def main():
     ce_w, kl_w, T = args.ce_weight, args.kl_weight, args.kl_temp
     steps_done = 0
     order = list(range(len(examples)))
+    # fp16 needs loss scaling to avoid underflow; bf16 has fp32's exponent
+    # range and must NOT be scaled.
+    use_scaler = amp_dtype is torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler) if use_scaler else None
+    use_amp = amp_dtype is not None and device == "cuda"
+    meta["grad_scaler"] = bool(use_scaler)
+    # Throughput evidence: steps/s over the timed region, so the bf16 win is
+    # measurable rather than asserted.
+    _t_start = None
+    _t_steps = 0
 
     try:
         while steps_done < args.steps:
@@ -496,8 +666,14 @@ def main():
                     padding=True,
                 )
                 enc = {k: v.to(device) for k, v in enc.items()}
-                out = model(**enc)
-                logits = out.logits
+                # Autocast the transformer matmuls; the letter-logit head below
+                # stays fp32 so CE/KL and the .item() loss print are unchanged.
+                with torch.autocast(
+                    device_type="cuda", dtype=amp_dtype, enabled=use_amp
+                ):
+                    out = model(**enc)
+                    logits = out.logits
+                logits = logits.float()
                 attn = enc["attention_mask"]
                 last = attn.sum(dim=1) - 1
                 bsz = logits.size(0)
@@ -525,15 +701,32 @@ def main():
                         loss = loss + kl_w * kl
                 loss = loss / max(1, len(batch))
                 opt.zero_grad()
-                loss.backward()
-                opt.step()
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    opt.step()
                 steps_done += 1
+                # Start the clock after step 1 so CUDA warmup/cuBLAS autotune
+                # does not flatter the first precision measured.
+                if steps_done == 2:
+                    _t_start = time.perf_counter()
+                    _t_steps = 0
+                elif _t_start is not None:
+                    _t_steps += 1
                 if steps_done == 1 or steps_done % max(1, args.steps // 5) == 0:
                     print(f"step {steps_done}/{args.steps} loss={loss.item():.4f}")
 
         model.save_pretrained(args.out)
         tok.save_pretrained(args.out)
         meta["steps_done"] = steps_done
+        if _t_start is not None and _t_steps > 0:
+            elapsed = time.perf_counter() - _t_start
+            meta["train_secs"] = round(elapsed, 3)
+            meta["timed_steps"] = _t_steps
+            meta["steps_per_sec"] = round(_t_steps / elapsed, 3)
         meta["status"] = "trained"
     except Exception as e:
         meta["status"] = "blocked"
@@ -542,7 +735,9 @@ def main():
 
     # Holdout eval — student adapter + teacher soft baseline.
     if hold_rows and meta.get("status") == "trained":
-        y_t, y_p, confs = _score_batch(model, tok, device, letter_ids, hold_rows)
+        y_t, y_p, confs = _score_batch(
+            model, tok, device, letter_ids, hold_rows, amp_dtype=amp_dtype
+        )
         meta["student_holdout"] = _ba_ece_arrays(y_t, y_p, confs)
         # Teacher soft baseline on same holdout IDs.
         ty, tp, tc = [], [], []
