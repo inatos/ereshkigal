@@ -27,6 +27,8 @@ default = []
 cuda = ["llama-cpp-2/cuda"]
 vulkan = ["llama-cpp-2/vulkan"]
 metal = ["llama-cpp-2/metal"]
+# Opt-in mmproj / mtmd visual letter logits via llama-cpp-2/mtmd.
+vision = ["llama-cpp-2/mtmd"]
 
 [dev-dependencies]
 serde_json.workspace = true

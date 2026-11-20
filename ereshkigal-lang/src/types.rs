@@ -4,6 +4,7 @@ use serde_json::Value;
 
 pub const LETTERS: &str = "ABCDEFGHIJKLMNOP";
 pub const PROMPT_VERSION: &str = "direct-options-v1";
+pub const PROMPT_VERSION_JOINT: &str = "joint-options-v1";
 pub const PROMPT_VERSION_OUTLINE: &str = "state-outline-v1";
 pub const PROMPT_VERSION_OPTIONS_FIRST: &str = "options-first-v1";
 pub const PROMPT_VERSION_PROBE_DECREE: &str = "probe-decree-v1";

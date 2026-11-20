@@ -1,22 +1,35 @@
 #!/usr/bin/env python3
-"""FP32 LoRA distillation for Qwen3-0.6B. Pascal (sm_61) friendly.
+"""LoRA distillation & CAPS/Cosine/CLEF training for Qwen3 / Gemma. Pascal (sm_61) friendly.
 
-Strict train/holdout IDs (no leakage). Gold option-restricted CE is primary;
-optional teacher soft KL over letter logits. Cyclic option permutation
-augmentation. Batched DOD tensors. Evidence: BA/ECE on holdout only —
-never 1e-6, never authored144.
+Strict train/holdout IDs (no leakage). Supports:
+- --mode ce (gold option-restricted CE + optional teacher soft KL) and
+  --mode caps (chosen-action proper scoring: Brier / log / both).
+- --readout letter (GGUF letter logits), --readout cosine (.ehead EHEAD01
+  exporter matching ereshkigal-core/src/cosine_head.rs), and --readout clef
+  (Python-only contextualized label-embedding fusion ablation).
+- --option-shuffle (per-epoch option shuffle preserving ordinal score order).
+- --attention bidirectional (unmasks full self-attention layers during train;
+  GGUF serve stays causal) with 4D additive non-causal padding mask.
+- --amp auto (Ampere+ bf16, Turing/Volta fp16 + GradScaler, Pascal sm_61 & CPU
+  fp32) with explicit fp32 readout head cast.
+
+Evidence: BA/ECE on holdout only — never 1e-6, never authored144.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import random
-import time
+import struct
 from collections import defaultdict
 from pathlib import Path
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+EHEAD_MAGIC = b"EHEAD01\x00"
+EHEAD_HEADER_BYTES = 24
+HEAD_DIM = 256
 
 
 def _ba_ece_arrays(y_true: list[int], y_pred: list[int], confs: list[float]) -> dict:
@@ -82,15 +95,19 @@ def freeze_split(
             by_lineage[lid].append(r)
         lineage_ids = list(by_lineage.keys())
         rng.shuffle(lineage_ids)
+        # Cap holdout at ~holdout_frac — never "one per family" when that empties train
+        # (unique lineage_id per row + many families used to put 100% in holdout).
+        n_hold = max(1, int(round(len(lineage_ids) * holdout_frac)))
+        n_hold = min(n_hold, max(1, len(lineage_ids) - 1))  # keep ≥1 train lineage when possible
         hold_lineages: set[str] = set()
-        # At least one lineage per family into holdout when possible.
         seen_fam: set[str] = set()
         for lid in lineage_ids:
+            if len(hold_lineages) >= n_hold:
+                break
             fam = str(by_lineage[lid][0].get("family") or "unknown")
             if fam not in seen_fam:
                 hold_lineages.add(lid)
                 seen_fam.add(fam)
-        n_hold = max(len(hold_lineages), int(round(len(lineage_ids) * holdout_frac)))
         for lid in lineage_ids:
             if len(hold_lineages) >= n_hold:
                 break
@@ -157,51 +174,132 @@ def _dumps_pythonish(value) -> str:
 _PROMPT_STYLE = "semif"
 
 
-def _prompt_from_row(row: dict) -> str:
-    """Render student prompt; default SemIf matches Rust / GGUF scorer.
+def _prompt_from_row_with_option_offsets(row: dict) -> tuple[str, list[int]]:
+    """Render student prompt + exact character offset of each option end marker.
 
-    Evidence is truncated to ``EVIDENCE_TOKEN_CAP`` *before* options so
-    ``max_length=768`` never clips option letters on Pascal FP32.
+    For SemIf (`direct-options-v1`), records the exact character index of each
+    option object's closing `}`, matching Rust `render_direct_prompt_with_option_offsets`.
     """
     state = truncate_evidence(row.get("state", ""), EVIDENCE_TOKEN_CAP)
+    opts = list(row.get("options") or [])
     if _PROMPT_STYLE == "compact":
         lines = [
             f"Question: {row.get('question', '')}",
             f"State: {state}",
             "Options:",
         ]
-        for i, o in enumerate(row.get("options") or []):
+        prefix = "\n".join(lines) + "\n"
+        out = prefix
+        offsets: list[int] = []
+        for i, o in enumerate(opts):
             desc = o.get("description") or o.get("id") or ""
-            lines.append(f"{LETTERS[i]}. {desc}")
-        lines.append("Answer:")
-        return "\n".join(lines)
-    options = []
-    for i, o in enumerate(row.get("options") or []):
-        options.append(
-            {
-                "letter": LETTERS[i],
-                "description": o.get("description") or o.get("id") or "",
-            }
-        )
-    payload = {
-        "evidence": state,
-        "criterion": row.get("question", ""),
-        "options": options,
-    }
+            out += f"{LETTERS[i]}. {desc}"
+            offsets.append(len(out) - 1)
+            out += "\n"
+        out += "Answer:"
+        return out, offsets
+
     system = DIRECT_SYSTEM.strip()
-    user = _dumps_pythonish(payload).strip()
-    return (
+    user_prefix = (
         f"<|im_start|>system\n{system}<|im_end|>\n"
-        f"<|im_start|>user\n{user}<|im_end|>\n"
+        f"<|im_start|>user\n"
+    )
+    parts = [
+        f'{{"evidence": {_dumps_pythonish(state)}, '
+        f'"criterion": {_dumps_pythonish(row.get("question", ""))}, '
+        f'"options": ['
+    ]
+    user = parts[0]
+    offsets = []
+    for i, o in enumerate(opts):
+        if i > 0:
+            user += ", "
+        desc = o.get("description") or o.get("id") or ""
+        user += (
+            f'{{"letter": {_dumps_pythonish(LETTERS[i])}, '
+            f'"description": {_dumps_pythonish(desc)}}}'
+        )
+        offsets.append(len(user_prefix) + len(user) - 1)
+    user += "]}"
+    prompt = (
+        f"{user_prefix}{user}<|im_end|>\n"
         f"<|im_start|>assistant\n<think>\n\n</think>\n\n"
     )
+    return prompt, offsets
+
+
+def _prompt_from_row(row: dict) -> str:
+    """Render student prompt; default SemIf matches Rust / GGUF scorer.
+
+    Evidence is truncated to ``EVIDENCE_TOKEN_CAP`` *before* options so
+    ``max_length=768`` never clips option letters on Pascal FP32.
+    """
+    prompt, _ = _prompt_from_row_with_option_offsets(row)
+    return prompt
+
+
+def _locate_option_tokens(
+    offset_mapping: list[tuple[int, int]],
+    opt_char_offsets: list[int],
+    seq_len: int,
+) -> list[int]:
+    """Map strictly increasing option-end char offsets to covering token indices."""
+    positions: list[int] = []
+    search_from = 0
+    for ch_off in opt_char_offsets:
+        found = None
+        for idx in range(search_from, min(seq_len, len(offset_mapping))):
+            start, end = offset_mapping[idx]
+            if start < end and start <= ch_off < end:
+                found = idx
+                break
+        if found is None:
+            # Fallback if prompt was truncated past max_length: clamp to last valid token.
+            found = max(0, min(seq_len - 1, search_from))
+        positions.append(found)
+        search_from = min(seq_len - 1, found + 1)
+    return positions
+
+
+def is_ordinal_row(row: dict) -> bool:
+    """Return True when option ordering carries ordinal/score meaning and must be preserved."""
+    if row.get("ordinal") or row.get("preserve_option_order"):
+        return True
+    kind = str(row.get("type") or row.get("kind") or "").strip().lower()
+    return kind in ("score", "ordinal", "scale", "rating")
+
+
+def shuffle_row_options(
+    row: dict,
+    rng: random.Random,
+    teacher_probs: list[float] | None = None,
+) -> tuple[dict, list[float] | None]:
+    """Per-epoch option shuffle that remaps label + teacher probs while preserving ordinal rows."""
+    opts = list(row.get("options") or [])
+    n = len(opts)
+    if n < 2 or is_ordinal_row(row):
+        return dict(row), (list(teacher_probs) if teacher_probs is not None else None)
+    perm = list(range(n))
+    rng.shuffle(perm)
+    shuffled = [opts[i] for i in perm]
+    out = dict(row)
+    out["options"] = shuffled
+    if "label" in row and row["label"] is not None:
+        old_label = int(row["label"])
+        if 0 <= old_label < n:
+            out["label"] = perm.index(old_label)
+    out["_perm"] = perm
+    new_probs = None
+    if teacher_probs is not None and len(teacher_probs) == n:
+        new_probs = [teacher_probs[i] for i in perm]
+    return out, new_probs
 
 
 def _permute_row(row: dict, k: int, teacher_probs: list[float] | None) -> tuple[dict, list[float] | None]:
     """Cyclic rotate options by k; remap gold label and teacher probs."""
     opts = list(row.get("options") or [])
     n = len(opts)
-    if n < 2:
+    if n < 2 or is_ordinal_row(row):
         return row, teacher_probs
     k = k % n
     if k == 0:
@@ -236,15 +334,375 @@ def _softmax_t(xs, dim: int = -1):
     return torch.nn.functional.softmax(xs, dim=dim)
 
 
+# ---------------------------------------------------------------------------
+# Phase 5: Cosine readout (.ehead EHEAD01 format) + CLEF Python-only ablation
+# ---------------------------------------------------------------------------
+
+
+def pack_ehead(
+    w_q: list[float],
+    w_o: list[float],
+    hidden: int,
+    theta: float,
+    head_dim: int = HEAD_DIM,
+) -> bytes:
+    """Serialize cosine readout weights matching Rust `CosineHead::load_ehead` (`EHEAD01\\0`)."""
+    expected = head_dim * hidden
+    if len(w_q) != expected or len(w_o) != expected:
+        raise ValueError(
+            f"ehead weight length mismatch: need {expected} each, got w_q={len(w_q)} w_o={len(w_o)}"
+        )
+    header = struct.pack("<8sIIfI", EHEAD_MAGIC, int(hidden), int(head_dim), float(theta), 0)
+    body_q = struct.pack(f"<{expected}f", *(float(v) for v in w_q))
+    body_o = struct.pack(f"<{expected}f", *(float(v) for v in w_o))
+    return header + body_q + body_o
+
+
+def unpack_ehead(data: bytes) -> dict:
+    """Deserialize `EHEAD01\\0` binary payload into `{hidden, head_dim, theta, w_q, w_o}`."""
+    if len(data) < EHEAD_HEADER_BYTES:
+        raise ValueError(f"ehead too short: {len(data)} < {EHEAD_HEADER_BYTES}")
+    magic, hidden, head_dim, theta, _reserved = struct.unpack_from("<8sIIfI", data, 0)
+    if magic != EHEAD_MAGIC:
+        raise ValueError(f"ehead invalid magic: {magic!r} != {EHEAD_MAGIC!r}")
+    count = head_dim * hidden
+    need = EHEAD_HEADER_BYTES + 2 * count * 4
+    if len(data) < need:
+        raise ValueError(f"ehead truncated: got {len(data)} bytes, need {need}")
+    w_q = list(struct.unpack_from(f"<{count}f", data, EHEAD_HEADER_BYTES))
+    w_o = list(struct.unpack_from(f"<{count}f", data, EHEAD_HEADER_BYTES + count * 4))
+    return {
+        "hidden": int(hidden),
+        "head_dim": int(head_dim),
+        "theta": float(theta),
+        "w_q": w_q,
+        "w_o": w_o,
+    }
+
+
+def export_ehead(
+    path: Path,
+    w_q: list[float],
+    w_o: list[float],
+    hidden: int,
+    theta: float,
+    head_dim: int = HEAD_DIM,
+) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(pack_ehead(w_q, w_o, hidden, theta, head_dim=head_dim))
+    return path
+
+
+def _rms_norm_py(x: list[float]) -> list[float]:
+    mean_sq = sum(v * v for v in x) / max(1, len(x))
+    inv = 1.0 / math.sqrt(mean_sq + 1e-6)
+    return [v * inv for v in x]
+
+
+def cosine_score_pair_py(
+    h_query: list[float],
+    h_option: list[float],
+    w_q: list[float],
+    w_o: list[float],
+    hidden: int,
+    theta: float,
+    head_dim: int = HEAD_DIM,
+) -> float:
+    """Pure-Python reference matching Rust `CosineHead::score_pair`."""
+    if len(h_query) != hidden or len(h_option) != hidden:
+        raise ValueError("hidden size mismatch")
+    hq = _rms_norm_py(h_query)
+    ho = _rms_norm_py(h_option)
+    q_raw = [
+        sum(w_q[i * hidden + j] * hq[j] for j in range(hidden)) for i in range(head_dim)
+    ]
+    o_raw = [
+        sum(w_o[i * hidden + j] * ho[j] for j in range(hidden)) for i in range(head_dim)
+    ]
+    q = _rms_norm_py(q_raw)
+    o = _rms_norm_py(o_raw)
+    dot = sum(a * b for a, b in zip(q, o))
+    scale = min(math.exp(float(theta)), 100.0) / float(head_dim)
+    return scale * dot
+
+
+def build_cosine_head(hidden: int, head_dim: int = HEAD_DIM):
+    """Build PyTorch `CosineHeadModule` (always computes readout in fp32)."""
+    import torch
+
+    class CosineHeadModule(torch.nn.Module):
+        def __init__(self, h: int, d: int):
+            super().__init__()
+            self.hidden = h
+            self.head_dim = d
+            self.w_q = torch.nn.Linear(h, d, bias=False)
+            self.w_o = torch.nn.Linear(h, d, bias=False)
+            self.theta = torch.nn.Parameter(torch.zeros(()))
+            torch.nn.init.uniform_(self.w_q.weight, -0.01, 0.01)
+            torch.nn.init.uniform_(self.w_o.weight, -0.01, 0.01)
+
+        @staticmethod
+        def rms_norm(x: torch.Tensor) -> torch.Tensor:
+            return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
+
+        def forward(self, h_query: torch.Tensor, h_options: torch.Tensor) -> torch.Tensor:
+            hq = self.rms_norm(h_query.float())
+            ho = self.rms_norm(h_options.float())
+            q = self.rms_norm(torch.nn.functional.linear(hq, self.w_q.weight.float()))
+            o = self.rms_norm(torch.nn.functional.linear(ho, self.w_o.weight.float()))
+            if o.dim() == 1:
+                dot = (q * o).sum(dim=-1)
+            else:
+                dot = (o * q.unsqueeze(0)).sum(dim=-1)
+            scale = torch.clamp(torch.exp(self.theta.float()), max=100.0) / float(self.head_dim)
+            return scale * dot
+
+        def to_ehead_bytes(self) -> bytes:
+            wq = self.w_q.weight.detach().cpu().float().contiguous().view(-1).tolist()
+            wo = self.w_o.weight.detach().cpu().float().contiguous().view(-1).tolist()
+            return pack_ehead(wq, wo, self.hidden, float(self.theta.detach().cpu().item()), self.head_dim)
+
+        def save_ehead(self, path: Path) -> Path:
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(self.to_ehead_bytes())
+            return p
+
+        @classmethod
+        def from_ehead_bytes(cls, data: bytes):
+            parsed = unpack_ehead(data)
+            mod = cls(parsed["hidden"], parsed["head_dim"])
+            with torch.no_grad():
+                mod.w_q.weight.copy_(
+                    torch.tensor(parsed["w_q"], dtype=torch.float32).view(
+                        parsed["head_dim"], parsed["hidden"]
+                    )
+                )
+                mod.w_o.weight.copy_(
+                    torch.tensor(parsed["w_o"], dtype=torch.float32).view(
+                        parsed["head_dim"], parsed["hidden"]
+                    )
+                )
+                mod.theta.fill_(float(parsed["theta"]))
+            return mod
+
+    return CosineHeadModule(hidden, head_dim)
+
+
+def load_cosine_head_ehead(path: Path):
+    """Load a `.ehead` (`EHEAD01\\0`) file into a PyTorch `CosineHeadModule`."""
+    data = Path(path).read_bytes()
+    parsed = unpack_ehead(data)
+    mod = build_cosine_head(parsed["hidden"], parsed["head_dim"])
+    return type(mod).from_ehead_bytes(data)
+
+
+def build_clef_head(hidden: int, proj_dim: int = HEAD_DIM):
+    """Python-only CLEF ablation head (contextualized label-embedding fusion, fp32)."""
+    import torch
+
+    class ClefHeadModule(torch.nn.Module):
+        def __init__(self, h: int, d: int):
+            super().__init__()
+            self.hidden = h
+            self.proj_dim = d
+            self.q_proj = torch.nn.Linear(h, d, bias=False)
+            self.o_proj = torch.nn.Linear(h, d, bias=False)
+            self.fuse = torch.nn.Sequential(
+                torch.nn.Linear(3 * d, d),
+                torch.nn.SiLU(),
+                torch.nn.Linear(d, 1),
+            )
+
+        @staticmethod
+        def rms_norm(x: torch.Tensor) -> torch.Tensor:
+            return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
+
+        def forward(self, h_query: torch.Tensor, h_options: torch.Tensor) -> torch.Tensor:
+            hq = self.rms_norm(h_query.float())
+            ho = self.rms_norm(h_options.float())
+            qp = self.q_proj(hq)  # [D]
+            op = self.o_proj(ho)  # [N, D]
+            qp_exp = qp.unsqueeze(0).expand_as(op)
+            fused = torch.cat([qp_exp, op, qp_exp * op], dim=-1)  # [N, 3D]
+            return self.fuse(fused).squeeze(-1)  # [N]
+
+    return ClefHeadModule(hidden, proj_dim)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: CAPS loss, bidirectional unmasking, AMP auto resolution
+# ---------------------------------------------------------------------------
+
+
+def caps_loss_py(
+    probs: list[float],
+    chosen_idx: int,
+    outcome: float = 1.0,
+    rule: str = "both",
+    eps: float = 1e-7,
+) -> float:
+    """CAPS chosen-action proper scoring rule (Brier / log / both)."""
+    p_a = float(probs[chosen_idx])
+    y = float(outcome)
+    p_c = min(max(p_a, eps), 1.0 - eps)
+    brier = (p_a - y) ** 2
+    log_s = -(y * math.log(p_c) + (1.0 - y) * math.log(1.0 - p_c))
+    if rule == "brier":
+        return brier
+    if rule == "log":
+        return log_s
+    if rule == "both":
+        return 0.5 * brier + 0.5 * log_s
+    raise ValueError(f"unknown caps rule {rule!r}")
+
+
+def caps_loss_torch(
+    option_logits,
+    chosen_idx: int,
+    outcome: float = 1.0,
+    rule: str = "both",
+    eps: float = 1e-7,
+):
+    """Differentiable CAPS proper scoring loss on chosen action (explicit fp32 head cast)."""
+    import torch
+
+    logits_f32 = option_logits.float()
+    probs = torch.softmax(logits_f32, dim=-1)
+    p_a = probs[int(chosen_idx)]
+    y = torch.tensor(float(outcome), device=logits_f32.device, dtype=torch.float32)
+    brier = (p_a - y).pow(2)
+    p_c = p_a.clamp(min=eps, max=1.0 - eps)
+    log_s = -(y * torch.log(p_c) + (1.0 - y) * torch.log(1.0 - p_c))
+    if rule == "brier":
+        return brier
+    if rule == "log":
+        return log_s
+    if rule == "both":
+        return 0.5 * brier + 0.5 * log_s
+    raise ValueError(f"unknown caps rule {rule!r}")
+
+
+def configure_bidirectional_attention(model, attention_mode: str) -> dict:
+    """Unmask full self-attention layers (`is_causal = False`) when `bidirectional`.
+
+    Skips recurrent/linear-attention layers (e.g. Qwen3.5 `linear_attn` / DeltaNet)
+    so only full self-attention layers are unmasked. GGUF serve stays causal.
+    """
+    if attention_mode != "bidirectional":
+        return {"mode": "causal", "unmasked_layers": 0, "patched_modules": []}
+    patched: list[str] = []
+    for name, mod in model.named_modules():
+        low = name.lower()
+        if "linear_attn" in low or "deltanet" in low:
+            continue
+        if hasattr(mod, "is_causal"):
+            try:
+                setattr(mod, "is_causal", False)
+                patched.append(name or type(mod).__name__)
+            except Exception:
+                pass
+    cfg = getattr(model, "config", None)
+    if cfg is not None and hasattr(cfg, "is_causal"):
+        try:
+            cfg.is_causal = False
+        except Exception:
+            pass
+    return {
+        "mode": "bidirectional",
+        "unmasked_layers": len(patched),
+        "patched_modules": patched,
+    }
+
+
+def build_attention_mask(attention_mask_2d, bidirectional: bool, dtype=None):
+    """Build explicit additive attention mask (4D for torch, 3D [B][T][T] for Python lists).
+
+    - `bidirectional=True`: valid tokens attend to ALL valid tokens (including `j > i`);
+      only pad tokens (`mask == 0`) are masked out.
+    - `bidirectional=False`: standard causal lower-triangular + padding mask.
+    """
+    if isinstance(attention_mask_2d, (list, tuple)):
+        neg = -1e9
+        out = []
+        for row in attention_mask_2d:
+            t = len(row)
+            mat = []
+            for i in range(t):
+                r = []
+                for j in range(t):
+                    valid_k = bool(row[j])
+                    allowed = valid_k and (bidirectional or j <= i)
+                    r.append(0.0 if allowed else neg)
+                mat.append(r)
+            out.append(mat)
+        return out
+
+    import torch
+
+    if not bidirectional:
+        return attention_mask_2d
+    bsz, seq_len = attention_mask_2d.shape
+    mask_dtype = dtype or torch.float32
+    min_val = torch.finfo(mask_dtype).min
+    # [B, 1, 1, T] broadcast to [B, 1, T, T]: 0.0 for valid keys, min_val for padded keys.
+    key_valid = attention_mask_2d.to(dtype=torch.bool)[:, None, None, :]
+    mask_4d = torch.zeros((bsz, 1, seq_len, seq_len), device=attention_mask_2d.device, dtype=mask_dtype)
+    mask_4d = mask_4d.masked_fill(~key_valid, min_val)
+    return mask_4d
+
+
+def resolve_amp_dtype(
+    amp_mode: str,
+    device: str,
+    cuda_capability: tuple[int, int] | None = None,
+) -> tuple[str, bool]:
+    """Resolve `(dtype_name, autocast_enabled)` with Pascal sm_61 safety.
+
+    Returns one of `("fp32", False)`, `("fp16", True)`, `("bf16", True)`.
+    Readout heads are always cast to `fp32` regardless of backbone autocast dtype.
+    """
+    mode = (amp_mode or "auto").strip().lower()
+    if mode == "none" or device != "cuda":
+        return ("fp32", False)
+    if mode == "bf16":
+        return ("bf16", True)
+    if mode == "fp16":
+        return ("fp16", True)
+    if mode == "auto":
+        if cuda_capability is None:
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    cuda_capability = torch.cuda.get_device_capability(0)
+            except Exception:
+                cuda_capability = None
+        if cuda_capability is None:
+            return ("fp32", False)
+        major, _minor = cuda_capability
+        if major >= 8:
+            return ("bf16", True)
+        if major >= 7:
+            return ("fp16", True)
+        # Pascal (sm_61, e.g. GTX 1080 Ti) has weak fp16 / no bf16 → stay fp32.
+        return ("fp32", False)
+    raise ValueError(f"unsupported amp mode {amp_mode!r}")
+
+
 def _build_examples(
     train_rows: list[dict],
     teacher_by_id: dict,
     permute: bool,
     upsample_families: set[str] | None = None,
     upsample_factor: int = 2,
+    option_shuffle: bool = False,
+    rng: random.Random | None = None,
 ) -> list[dict]:
     ex = []
     up = upsample_families or set()
+    shuf_rng = rng or random.Random(7)
     for row in train_rows:
         tid = row["id"]
         soft = None
@@ -254,90 +712,173 @@ def _build_examples(
             if soft is not None:
                 soft = [float(x) for x in soft]
         n = len(row.get("options") or [])
-        cycles = list(range(n)) if permute and n >= 2 else [0]
         fam = str(row.get("family") or "")
         reps = upsample_factor if fam in up else 1
+        outcome = float(row.get("outcome", row.get("reward", 1.0)))
+        weight = float(row.get("rlsf_weight", row.get("advantage", 1.0)))
         for _ in range(reps):
-            for k in cycles:
-                prow, psoft = _permute_row(row, k, soft)
+            if option_shuffle:
+                prow, psoft = shuffle_row_options(row, shuf_rng, soft)
+                prompt, opt_offsets = _prompt_from_row_with_option_offsets(prow)
                 ex.append(
                     {
                         "id": tid,
-                        "prompt": _prompt_from_row(prow),
+                        "prompt": prompt,
+                        "opt_offsets": opt_offsets,
                         "label": int(prow["label"]),
                         "n_opts": len(prow.get("options") or []),
                         "teacher_probs": psoft,
+                        "outcome": outcome,
+                        "weight": weight,
                     }
                 )
+            else:
+                cycles = list(range(n)) if permute and n >= 2 and not is_ordinal_row(row) else [0]
+                for k in cycles:
+                    prow, psoft = _permute_row(row, k, soft)
+                    prompt, opt_offsets = _prompt_from_row_with_option_offsets(prow)
+                    ex.append(
+                        {
+                            "id": tid,
+                            "prompt": prompt,
+                            "opt_offsets": opt_offsets,
+                            "label": int(prow["label"]),
+                            "n_opts": len(prow.get("options") or []),
+                            "teacher_probs": psoft,
+                            "outcome": outcome,
+                            "weight": weight,
+                        }
+                    )
     return ex
 
 
-def _resolve_amp_dtype(torch, device: str, requested: str):
-    """Pick the autocast dtype, degrading gracefully where bf16 has no hardware.
+def _forward_option_logits(
+    model,
+    tok,
+    device: str,
+    letter_ids: list[int],
+    prompts: list[str],
+    opt_offsets_batch: list[list[int]],
+    n_opts_list: list[int],
+    max_length: int,
+    readout: str,
+    head_module,
+    bidirectional: bool,
+    amp_kind: str,
+    use_amp: bool,
+):
+    """Run one batched forward pass; returns list of per-example fp32 `[n_opts]` tensors."""
+    import torch
 
-    bf16 needs sm_80+ (Ampere). The pinned venv is also used on a Pascal 1080 Ti
-    (sm_61), which has no bf16 hardware, so asking for bf16 there would not give
-    the tensor rate it asks for. Resolve once, record the choice in
-    train_status.json, and keep the loss head in fp32 regardless.
-    """
-    if requested == "off" or device == "cpu":
-        return None, "fp32 (no autocast)" if device != "cpu" else "fp32 (cpu)"
-    if requested == "fp16":
-        return torch.float16, "fp16"
-    # bf16 / auto both want bf16 when it is real hardware.
-    try:
-        if torch.cuda.is_bf16_supported():
-            return torch.bfloat16, "bf16" if requested == "bf16" else "bf16 (auto)"
-    except Exception:
-        pass
-    return torch.float16, "fp16 (bf16 unsupported on this GPU)"
+    need_hidden = readout in ("cosine", "clef")
+    enc = tok(
+        prompts,
+        return_tensors="pt",
+        truncation=True,
+        max_length=max_length,
+        padding=True,
+        return_offsets_mapping=need_hidden,
+    )
+    offset_mappings = enc.pop("offset_mapping", None)
+    orig_attn = enc["attention_mask"].to(device)
+    model_inputs = {
+        "input_ids": enc["input_ids"].to(device),
+        "attention_mask": orig_attn,
+    }
+    if bidirectional:
+        mask_dtype = (
+            torch.bfloat16
+            if (use_amp and amp_kind == "bf16")
+            else (torch.float16 if (use_amp and amp_kind == "fp16") else torch.float32)
+        )
+        model_inputs["attention_mask"] = build_attention_mask(
+            orig_attn, bidirectional=True, dtype=mask_dtype
+        )
+
+    if use_amp:
+        amp_dtype = torch.bfloat16 if amp_kind == "bf16" else torch.float16
+        ctx = torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=True)
+    else:
+        ctx = contextlib.nullcontext()
+
+    with ctx:
+        out = model(**model_inputs, output_hidden_states=need_hidden)
+
+    last = orig_attn.sum(dim=1) - 1  # [B]
+    bsz = orig_attn.size(0)
+    per_row_logits = []
+    if need_hidden:
+        # Always cast hidden states to fp32 before readout head (--amp auto fp32 head cast).
+        hidden = out.hidden_states[-1].float()  # [B, T, H]
+        for i in range(bsz):
+            seq_len = int(orig_attn[i].sum().item())
+            om = offset_mappings[i].tolist() if offset_mappings is not None else []
+            opt_pos = _locate_option_tokens(om, opt_offsets_batch[i], seq_len)
+            h_q = hidden[i, last[i]]  # [H]
+            h_opts = hidden[i, opt_pos]  # [n, H]
+            per_row_logits.append(head_module(h_q, h_opts).float())
+    else:
+        # Explicit fp32 head cast on gathered letter logits.
+        logits = out.logits
+        gathered = logits[torch.arange(bsz, device=device), last].float()  # [B, V]
+        for i in range(bsz):
+            n = n_opts_list[i]
+            per_row_logits.append(gathered[i, letter_ids[:n]])
+    return per_row_logits
 
 
 def _score_batch(
-    model, tok, device, letter_ids: list[int], rows: list[dict], batch_size: int = 4, amp_dtype=None
+    model,
+    tok,
+    device,
+    letter_ids: list[int],
+    rows: list[dict],
+    batch_size: int = 4,
+    max_length: int = 768,
+    readout: str = "letter",
+    head_module=None,
+    bidirectional: bool = False,
+    amp_kind: str = "fp32",
+    use_amp: bool = False,
 ):
-    """Batched letter-logit scoring. Returns parallel pred/conf/label arrays."""
+    """Batched scoring for letter, cosine, or clef readouts. Returns pred/conf/label arrays."""
     import torch
 
     model.eval()
+    if head_module is not None:
+        head_module.eval()
     y_true: list[int] = []
     y_pred: list[int] = []
     confs: list[float] = []
-    prompts = [_prompt_from_row(r) for r in rows]
+    rendered = [_prompt_from_row_with_option_offsets(r) for r in rows]
+    prompts = [p for p, _ in rendered]
+    opt_offsets = [o for _, o in rendered]
     labels = [int(r["label"]) for r in rows]
     n_opts_list = [len(r.get("options") or []) for r in rows]
 
     for start in range(0, len(prompts), batch_size):
         chunk_p = prompts[start : start + batch_size]
+        chunk_o = opt_offsets[start : start + batch_size]
         chunk_n = n_opts_list[start : start + batch_size]
         chunk_y = labels[start : start + batch_size]
-        enc = tok(
-            chunk_p,
-            return_tensors="pt",
-            truncation=True,
-            max_length=768,
-            padding=True,
-        )
-        enc = {k: v.to(device) for k, v in enc.items()}
         with torch.no_grad():
-            # Autocast only the forward matmuls; score the letter logits in
-            # fp32 so BA/ECE stay comparable across precisions.
-            with torch.autocast(
-                device_type="cuda",
-                dtype=amp_dtype,
-                enabled=amp_dtype is not None and device == "cuda",
-            ):
-                logits = model(**enc).logits  # [B, T, V]
-            logits = logits.float()
-            # Last non-pad position per row.
-            attn = enc["attention_mask"]
-            last = attn.sum(dim=1) - 1  # [B]
-            b = logits.size(0)
-            gathered = logits[torch.arange(b, device=device), last]  # [B, V]
-        for i in range(b):
-            n = chunk_n[i]
-            scores = gathered[i, letter_ids[:n]]
-            probs = _softmax_t(scores, dim=0)
+            row_logits = _forward_option_logits(
+                model,
+                tok,
+                device,
+                letter_ids,
+                chunk_p,
+                chunk_o,
+                chunk_n,
+                max_length,
+                readout,
+                head_module,
+                bidirectional,
+                amp_kind,
+                use_amp,
+            )
+        for i, scores in enumerate(row_logits):
+            probs = _softmax_t(scores.float(), dim=0)
             pred = int(torch.argmax(probs).item())
             conf = float(probs[pred].item())
             y_true.append(chunk_y[i])
@@ -366,20 +907,10 @@ def main():
     p.add_argument(
         "--rlsf-weights",
         action="store_true",
-        help="Weight CE loss by row rlsf_weight / advantage when present",
+        help="Weight loss by row rlsf_weight / advantage when present",
     )
     p.add_argument("--out", type=Path, default=Path("packs/qwen3-0.6b-lora"))
     p.add_argument("--cpu", action="store_true")
-    p.add_argument(
-        "--amp",
-        choices=("auto", "bf16", "fp16", "off"),
-        default="auto",
-        help=(
-            "autocast dtype for fwd/bwd. auto = bf16 when the GPU supports it "
-            "else fp16; off = fp32 (old behaviour). Pascal (sm_61) has no bf16 "
-            "and resolves to fp16"
-        ),
-    )
     p.add_argument("--steps", type=int, default=0)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--lora-r", type=int, default=16)
@@ -419,7 +950,61 @@ def main():
         type=Path,
         help="Continue training from an existing PEFT pack (trainable)",
     )
+    p.add_argument(
+        "--mode",
+        default="ce",
+        choices=("ce", "caps"),
+        help="ce = option CE/KL; caps = chosen-action proper scoring (Brier/log)",
+    )
+    p.add_argument(
+        "--caps-rule",
+        default="both",
+        choices=("both", "brier", "log"),
+        help="proper scoring rule for --mode caps (default: 0.5*brier + 0.5*log)",
+    )
+    p.add_argument(
+        "--readout",
+        default="letter",
+        choices=("letter", "cosine", "clef"),
+        help="letter logits (GGUF); cosine .ehead; clef=python ablation only",
+    )
+    p.add_argument(
+        "--attention",
+        default="causal",
+        choices=("causal", "bidirectional"),
+        help="bidirectional unmasks full-attn layers in train; GGUF serve stays causal",
+    )
+    p.add_argument(
+        "--amp",
+        default="auto",
+        choices=("auto", "none", "bf16", "fp16"),
+        help="mixed precision autocast (auto: bf16 Ampere+, fp16 sm_70+, fp32 Pascal/CPU); readout head always fp32",
+    )
+    p.add_argument(
+        "--option-shuffle",
+        action="store_true",
+        help="per-epoch option shuffle (preserve ordinal score order)",
+    )
+    p.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=[7, 11, 13],
+        help="Jeff-1.1 soup seeds (use soup_lora.py after)",
+    )
+    p.add_argument(
+        "--qwen-linear-attn-targets",
+        action="store_true",
+        help="also target in_proj_qkv,in_proj_z,out_proj for Qwen linear-attn",
+    )
     args = p.parse_args()
+    if args.qwen_linear_attn_targets:
+        extra = ["in_proj_qkv", "in_proj_z", "out_proj"]
+        cur = [x.strip() for x in args.lora_targets.split(",") if x.strip()]
+        for e in extra:
+            if e not in cur:
+                cur.append(e)
+        args.lora_targets = ",".join(cur)
     args.out.mkdir(parents=True, exist_ok=True)
 
     meta: dict = {
@@ -428,13 +1013,20 @@ def main():
         "gold": str(args.gold) if args.gold else None,
         "steps": args.steps,
         "lr": args.lr,
+        "mode": args.mode,
+        "caps_rule": args.caps_rule if args.mode == "caps" else None,
+        "readout": args.readout,
+        "attention": args.attention,
+        "amp": args.amp,
+        "head_dtype": "float32",
+        "option_shuffle": bool(args.option_shuffle),
         "ce_weight": args.ce_weight,
         "kl_weight": args.kl_weight,
         "kl_temp": args.kl_temp,
         "permute": args.permute,
         "note": (
             "strict split; SemIf direct-options-v1 prompts (Rust-parity); "
-            "gold CE primary + soft KL; BA/ECE holdout only; never 1e-6/authored144"
+            "CE or CAPS proper scoring; BA/ECE holdout only; never 1e-6/authored144"
         ),
         "prompt_version": (
             "direct-options-v1" if args.prompt_style == "semif" else "compact-student-v1"
@@ -443,6 +1035,8 @@ def main():
         "status": "scaffolded",
         "gate_BA": 0.75,
     }
+    if args.readout == "clef":
+        meta["python_only_ablation"] = True
     global _PROMPT_STYLE
     _PROMPT_STYLE = args.prompt_style
 
@@ -556,8 +1150,14 @@ def main():
 
     meta["torch"] = torch.__version__
     meta["cuda"] = torch.cuda.is_available()
-    if torch.cuda.is_available() and not args.cpu:
+    device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
+    cuda_cap = torch.cuda.get_device_capability(0) if device == "cuda" else None
+    amp_kind, use_amp = resolve_amp_dtype(args.amp, device, cuda_cap)
+    meta["device"] = device
+    meta["amp_resolved"] = amp_kind
+    if device == "cuda":
         meta["gpu"] = torch.cuda.get_device_name(0)
+        meta["cuda_capability"] = list(cuda_cap) if cuda_cap else None
 
     targets = [t.strip() for t in args.lora_targets.split(",") if t.strip()]
     cfg = LoraConfig(r=args.lora_r, lora_alpha=args.lora_alpha, target_modules=targets)
@@ -566,31 +1166,45 @@ def main():
     if args.steps <= 0:
         meta["status"] = "smoke"
         (args.out / "train_status.json").write_text(json.dumps(meta, indent=2) + "\n")
-        print("smoke only", meta["torch"], meta["cuda"])
+        print("smoke only", meta["torch"], meta["cuda"], "amp=", amp_kind)
         return
 
-    device = "cpu" if args.cpu or not torch.cuda.is_available() else "cuda"
-    meta["device"] = device
-    amp_dtype, amp_label = _resolve_amp_dtype(torch, device, args.amp)
-    meta["amp_requested"] = args.amp
-    meta["amp_resolved"] = amp_label
     tok = AutoTokenizer.from_pretrained(args.student, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     letter_ids = _letter_id_cache(tok, 16)
 
-    # Weights in the autocast dtype so the matmuls run on the tensor path;
-    # the letter-logit loss head is cast back to fp32 at use.
-    weight_dtype = amp_dtype if amp_dtype is not None else torch.float32
     base = AutoModelForCausalLM.from_pretrained(
-        args.student, torch_dtype=weight_dtype, trust_remote_code=True
+        args.student, torch_dtype=torch.float32, trust_remote_code=True
     )
     base.to(device)
 
-    # Unadapted student baseline on holdout (same prompt as student).
+    bidirectional = args.attention == "bidirectional"
+    attn_patch = configure_bidirectional_attention(base, args.attention)
+    meta["attention_patch"] = attn_patch
+
+    head_module = None
+    if args.readout == "cosine":
+        hidden_size = int(getattr(base.config, "hidden_size"))
+        head_module = build_cosine_head(hidden_size, HEAD_DIM).to(device=device, dtype=torch.float32)
+    elif args.readout == "clef":
+        hidden_size = int(getattr(base.config, "hidden_size"))
+        head_module = build_clef_head(hidden_size, HEAD_DIM).to(device=device, dtype=torch.float32)
+
+    # Unadapted student baseline on holdout (letter readout baseline).
     if hold_rows:
         y_t, y_p, confs = _score_batch(
-            base, tok, device, letter_ids, hold_rows, amp_dtype=amp_dtype
+            base,
+            tok,
+            device,
+            letter_ids,
+            hold_rows,
+            max_length=args.max_length,
+            readout=args.readout,
+            head_module=head_module,
+            bidirectional=bidirectional,
+            amp_kind=amp_kind,
+            use_amp=use_amp,
         )
         meta["unadapted_holdout"] = _ba_ece_arrays(y_t, y_p, confs)
 
@@ -608,16 +1222,28 @@ def main():
         print(f"continue from adapter {init_path}")
     else:
         model = get_peft_model(base, cfg)
+    if bidirectional:
+        # Ensure wrapped PEFT model layers retain is_causal = False.
+        configure_bidirectional_attention(model, "bidirectional")
+
     model.train()
-    opt = torch.optim.AdamW([x for x in model.parameters() if x.requires_grad], lr=args.lr)
+    trainable = [x for x in model.parameters() if x.requires_grad]
+    if head_module is not None:
+        head_module.train()
+        trainable.extend(x for x in head_module.parameters() if x.requires_grad)
+    opt = torch.optim.AdamW(trainable, lr=args.lr)
+    scaler = torch.amp.GradScaler("cuda", enabled=(device == "cuda" and amp_kind == "fp16"))
 
     up_fams = {f.strip() for f in args.upsample_families.split(",") if f.strip()}
+    rng = random.Random(args.split_seed)
     examples = _build_examples(
         train_rows,
         teacher_by_id,
         args.permute,
         upsample_families=up_fams,
         upsample_factor=max(1, args.upsample_factor),
+        option_shuffle=args.option_shuffle,
+        rng=rng,
     )
     meta["n_examples_aug"] = len(examples)
     meta["upsample_families"] = sorted(up_fams)
@@ -629,79 +1255,87 @@ def main():
         (args.out / "train_status.json").write_text(json.dumps(meta, indent=2) + "\n")
         return
 
-    rng = random.Random(args.split_seed)
     mb = max(1, args.microbatch)
     ce_w, kl_w, T = args.ce_weight, args.kl_weight, args.kl_temp
+    hold_set = set(hold_ids)
     steps_done = 0
-    order = list(range(len(examples)))
-    # fp16 needs loss scaling to avoid underflow; bf16 has fp32's exponent
-    # range and must NOT be scaled.
-    use_scaler = amp_dtype is torch.float16
-    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler) if use_scaler else None
-    use_amp = amp_dtype is not None and device == "cuda"
-    meta["grad_scaler"] = bool(use_scaler)
-    # Throughput evidence: steps/s over the timed region, so the bf16 win is
-    # measurable rather than asserted.
-    _t_start = None
-    _t_steps = 0
+    epoch = 0
 
     try:
         while steps_done < args.steps:
+            if args.option_shuffle and epoch > 0:
+                examples = _build_examples(
+                    train_rows,
+                    teacher_by_id,
+                    False,
+                    upsample_families=up_fams,
+                    upsample_factor=max(1, args.upsample_factor),
+                    option_shuffle=True,
+                    rng=rng,
+                )
+            epoch += 1
+            order = list(range(len(examples)))
             rng.shuffle(order)
             for start in range(0, len(order), mb):
                 if steps_done >= args.steps:
                     break
                 idxs = order[start : start + mb]
-                batch = [examples[i] for i in idxs]
-                # Skip any example whose source id is holdout (belt+suspenders).
-                batch = [b for b in batch if b["id"] not in set(hold_ids)]
+                batch = [examples[i] for i in idxs if examples[i]["id"] not in hold_set]
                 if not batch:
                     continue
                 prompts = [b["prompt"] for b in batch]
-                enc = tok(
-                    prompts,
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=args.max_length,
-                    padding=True,
-                )
-                enc = {k: v.to(device) for k, v in enc.items()}
-                # Autocast the transformer matmuls; the letter-logit head below
-                # stays fp32 so CE/KL and the .item() loss print are unchanged.
-                with torch.autocast(
-                    device_type="cuda", dtype=amp_dtype, enabled=use_amp
-                ):
-                    out = model(**enc)
-                    logits = out.logits
-                logits = logits.float()
-                attn = enc["attention_mask"]
-                last = attn.sum(dim=1) - 1
-                bsz = logits.size(0)
-                gathered = logits[torch.arange(bsz, device=device), last]  # [B, V]
+                opt_offsets_batch = [b["opt_offsets"] for b in batch]
+                n_opts_list = [b["n_opts"] for b in batch]
 
-                loss = torch.zeros((), device=device)
+                row_logits = _forward_option_logits(
+                    model,
+                    tok,
+                    device,
+                    letter_ids,
+                    prompts,
+                    opt_offsets_batch,
+                    n_opts_list,
+                    args.max_length,
+                    args.readout,
+                    head_module,
+                    bidirectional,
+                    amp_kind,
+                    use_amp,
+                )
+
+                loss = torch.zeros((), device=device, dtype=torch.float32)
                 for i, ex in enumerate(batch):
                     n = ex["n_opts"]
-                    letter_logits = gathered[i, letter_ids[:n]]  # [n]
+                    opt_logits = row_logits[i].float()  # explicit fp32 head cast
                     gold = int(ex["label"])
-                    ce = torch.nn.functional.cross_entropy(
-                        letter_logits.unsqueeze(0),
-                        torch.tensor([gold], device=device),
-                    )
-                    loss = loss + ce_w * ce
+                    ex_weight = float(ex.get("weight", 1.0)) if args.rlsf_weights else 1.0
+                    if args.mode == "caps":
+                        primary = caps_loss_torch(
+                            opt_logits,
+                            gold,
+                            outcome=float(ex.get("outcome", 1.0)),
+                            rule=args.caps_rule,
+                        )
+                    else:
+                        primary = torch.nn.functional.cross_entropy(
+                            opt_logits.unsqueeze(0),
+                            torch.tensor([gold], device=device),
+                        )
+                    ex_loss = ce_w * primary
                     soft = ex.get("teacher_probs")
                     if soft is not None and len(soft) == n and kl_w > 0:
                         teacher = torch.tensor(soft, device=device, dtype=torch.float32)
                         teacher = teacher / teacher.sum().clamp_min(1e-8)
                         # KL(teacher || student) with temperature on student logits.
-                        log_s = torch.nn.functional.log_softmax(letter_logits / T, dim=0)
+                        log_s = torch.nn.functional.log_softmax(opt_logits / T, dim=0)
                         kl = torch.nn.functional.kl_div(
                             log_s, teacher, reduction="sum"
                         ) * (T * T)
-                        loss = loss + kl_w * kl
+                        ex_loss = ex_loss + kl_w * kl
+                    loss = loss + ex_weight * ex_loss
                 loss = loss / max(1, len(batch))
                 opt.zero_grad()
-                if scaler is not None:
+                if scaler.is_enabled():
                     scaler.scale(loss).backward()
                     scaler.step(opt)
                     scaler.update()
@@ -709,24 +1343,34 @@ def main():
                     loss.backward()
                     opt.step()
                 steps_done += 1
-                # Start the clock after step 1 so CUDA warmup/cuBLAS autotune
-                # does not flatter the first precision measured.
-                if steps_done == 2:
-                    _t_start = time.perf_counter()
-                    _t_steps = 0
-                elif _t_start is not None:
-                    _t_steps += 1
                 if steps_done == 1 or steps_done % max(1, args.steps // 5) == 0:
-                    print(f"step {steps_done}/{args.steps} loss={loss.item():.4f}")
+                    print(
+                        f"step {steps_done}/{args.steps} mode={args.mode} "
+                        f"readout={args.readout} loss={loss.item():.4f}"
+                    )
 
         model.save_pretrained(args.out)
         tok.save_pretrained(args.out)
+        if args.readout == "cosine" and head_module is not None:
+            ehead_path = head_module.save_ehead(args.out / "cosine_head.ehead")
+            meta["ehead"] = str(ehead_path)
+            print("wrote cosine head", ehead_path)
+        elif args.readout == "clef" and head_module is not None:
+            clef_path = args.out / "clef_head.pt"
+            torch.save(
+                {
+                    "readout": "clef",
+                    "python_only_ablation": True,
+                    "hidden": head_module.hidden,
+                    "proj_dim": head_module.proj_dim,
+                    "state_dict": head_module.state_dict(),
+                },
+                clef_path,
+            )
+            meta["clef_head"] = str(clef_path)
+            print("wrote python-only CLEF ablation head", clef_path)
         meta["steps_done"] = steps_done
-        if _t_start is not None and _t_steps > 0:
-            elapsed = time.perf_counter() - _t_start
-            meta["train_secs"] = round(elapsed, 3)
-            meta["timed_steps"] = _t_steps
-            meta["steps_per_sec"] = round(_t_steps / elapsed, 3)
+        meta["epochs_started"] = epoch
         meta["status"] = "trained"
     except Exception as e:
         meta["status"] = "blocked"
@@ -736,7 +1380,17 @@ def main():
     # Holdout eval — student adapter + teacher soft baseline.
     if hold_rows and meta.get("status") == "trained":
         y_t, y_p, confs = _score_batch(
-            model, tok, device, letter_ids, hold_rows, amp_dtype=amp_dtype
+            model,
+            tok,
+            device,
+            letter_ids,
+            hold_rows,
+            max_length=args.max_length,
+            readout=args.readout,
+            head_module=head_module,
+            bidirectional=bidirectional,
+            amp_kind=amp_kind,
+            use_amp=use_amp,
         )
         meta["student_holdout"] = _ba_ece_arrays(y_t, y_p, confs)
         # Teacher soft baseline on same holdout IDs.
@@ -758,8 +1412,8 @@ def main():
         meta["gate_pass"] = bool(ba is not None and ba >= 0.75)
         meta["holdout_note"] = (
             "strict holdout IDs never trained; "
-            "unadapted_holdout = base student letter logits; "
-            "student_holdout = adapter letter logits; "
+            "unadapted_holdout = base student readout; "
+            "student_holdout = adapted student readout; "
             "teacher_holdout = teacher soft argmax; BA/ECE only"
         )
 
@@ -767,10 +1421,16 @@ def main():
     print("wrote", args.out / "train_status.json")
     keys = (
         "status",
+        "mode",
+        "readout",
+        "attention",
+        "amp_resolved",
         "steps_done",
         "n_train",
         "n_holdout",
         "n_examples_aug",
+        "ehead",
+        "clef_head",
         "unadapted_holdout",
         "teacher_holdout",
         "student_holdout",

@@ -24,8 +24,9 @@ pub mod validate;
 
 pub use calib::{
     apply_temperature, balanced_accuracy, ece, fit_temperature, fit_temperature_oof,
-    fit_temperature_oof_grouped, mean_family_balanced_accuracy, OofCalib,
+    fit_temperature_oof_grouped, mean_family_balanced_accuracy, OofCalib, TypeTemperatures,
 };
+pub use metrics::{aurc, brier, nll, rps};
 pub use conformal::{coverage as conformal_coverage, fit_qhat, mean_set_size, option_set};
 pub use optimize::{overlap_nll, pick_lowest_nll, rank_variants_overlap};
 pub use debias::{
@@ -33,9 +34,12 @@ pub use debias::{
     pride_log_prior, prior_from_content_free,
 };
 pub use decided::{DecideStatus, Decided, ProgramResult};
-pub use decree::{Decree, Library, Program};
+pub use decree::{Decree, Library, Program, ThinkSpec};
 pub use error::{Error, Result};
-pub use prompt::{digest, direct_messages, render_prompt, render_prompt_version};
+pub use prompt::{
+    digest, direct_messages, joint_options_batch_messages, joint_options_messages,
+    render_joint_batch_prompt_with_offsets, render_prompt, render_prompt_version,
+};
 pub use softmax::{argmax, softmax};
 pub use schema::library_schema_json;
 pub use syntax::{parse_library, print_library};

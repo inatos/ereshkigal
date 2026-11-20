@@ -84,12 +84,29 @@ enum Cmd {
         stdio: bool,
         #[arg(long)]
         http: Option<u16>,
+        /// Bind host for `--http` (default 127.0.0.1; Myridos uses 10.55.0.2).
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
         #[arg(long)]
         lib: PathBuf,
         #[arg(long)]
         gguf: Option<PathBuf>,
         #[arg(long)]
         adapter: Option<PathBuf>,
+        #[arg(long)]
+        adapter_scale: Option<f32>,
+        #[arg(long)]
+        mmproj: Option<PathBuf>,
+        #[arg(long)]
+        cosine_head: Option<PathBuf>,
+        #[arg(long)]
+        n_gpu_layers: Option<u32>,
+        #[arg(long)]
+        n_seq_max: Option<u32>,
+        #[arg(long)]
+        max_prompt_tokens: Option<usize>,
+        #[arg(long)]
+        calibration: Option<PathBuf>,
     },
     Lsp,
     Explain {
@@ -228,12 +245,47 @@ fn main() -> Result<()> {
             lf.save(&out)?;
             println!("wrote {}", out.display());
         }
-        Cmd::Serve { stdio, http, lib, gguf, adapter } => {
+        Cmd::Serve {
+            stdio,
+            http,
+            bind,
+            lib,
+            gguf,
+            adapter,
+            adapter_scale,
+            mmproj,
+            cosine_head,
+            n_gpu_layers,
+            n_seq_max,
+            max_prompt_tokens,
+            calibration,
+        } => {
             if let Some(ref a) = adapter {
                 std::env::set_var("ERESHKIGAL_ADAPTER", a);
             }
+            if let Some(s) = adapter_scale {
+                std::env::set_var("ERESHKIGAL_ADAPTER_SCALE", s.to_string());
+            }
+            if let Some(ref m) = mmproj {
+                std::env::set_var("ERESHKIGAL_MMPROJ", m);
+            }
+            if let Some(ref ch) = cosine_head {
+                std::env::set_var("ERESHKIGAL_COSINE_HEAD", ch);
+            }
+            if let Some(n) = n_gpu_layers {
+                std::env::set_var("N_GPU_LAYERS", n.to_string());
+            }
+            if let Some(n) = n_seq_max {
+                std::env::set_var("ERESHKIGAL_N_SEQ_MAX", n.to_string());
+            }
+            if let Some(n) = max_prompt_tokens {
+                std::env::set_var("ERESHKIGAL_MAX_PROMPT_TOKENS", n.to_string());
+            }
+            if let Some(ref c) = calibration {
+                std::env::set_var("ERESHKIGAL_CALIBRATION", c);
+            }
             if let Some(port) = http {
-                serve::serve_http(port, &lib, gguf)?;
+                serve::serve_http_bind((bind, port), &lib, gguf)?;
             } else {
                 let _ = stdio;
                 serve::serve_stdio(&lib, gguf)?;
@@ -423,15 +475,30 @@ pub(crate) fn load_runtime(gguf: Option<PathBuf>, adapter: Option<PathBuf>) -> R
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    let max_prompt_tokens = std::env::var("ERESHKIGAL_MAX_PROMPT_TOKENS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4096usize);
+    let n_seq_max = std::env::var("ERESHKIGAL_N_SEQ_MAX")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8u32);
+    let embeddings = std::env::var_os("ERESHKIGAL_COSINE_HEAD")
+        .filter(|s| !s.is_empty())
+        .is_some()
+        || matches!(
+            std::env::var("ERESHKIGAL_EMBEDDINGS").as_deref(),
+            Ok("1") | Ok("true") | Ok("TRUE")
+        );
     let (engine, tokenizer) = EngineOwned::load(EngineConfig {
         gguf,
         tokenizer_source: tok_src,
         tokenizer_revision: tok_rev,
-        max_prompt_tokens: 4096,
+        max_prompt_tokens,
         threads,
         n_gpu_layers,
-        n_seq_max: 8,
-        embeddings: false,
+        n_seq_max,
+        embeddings,
         adapter,
         adapter_scale: std::env::var("ERESHKIGAL_ADAPTER_SCALE")
             .ok()

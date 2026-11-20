@@ -2,7 +2,7 @@
 
 use crate::decree::{
     AbstainSpec, BackendKind, DebiasMode, Decree, DecreeKind, ForEach, ForEachOp, GoldTest, Guard,
-    Library, MatchArm, OnAbstain, Program, ProgramNode,
+    Library, MatchArm, OnAbstain, Program, ProgramNode, ThinkSpec,
 };
 use crate::error::{Error, Result};
 use crate::types::OptionSpec;
@@ -70,6 +70,8 @@ pub enum Tok {
     SplitKw,
     #[token("group")]
     Group,
+    #[token("think")]
+    Think,
     #[token("{")]
     LBrace,
     #[token("}")]
@@ -222,6 +224,7 @@ impl<'a> Parser<'a> {
         let mut kind = DecreeKind::Enum;
         let mut backend = BackendKind::Letter;
         let debias = DebiasMode::None;
+        let mut think: Option<ThinkSpec> = None;
         while !matches!(self.peek(), Some(Tok::RBrace) | None) {
             match self.peek() {
                 Some(Tok::Abstain) => {
@@ -294,7 +297,9 @@ impl<'a> Parser<'a> {
                     let k = self.ident()?;
                     kind = match k.as_str() {
                         "bool" => DecreeKind::Bool,
+                        "noul" => DecreeKind::Noul,
                         "ordinal" => DecreeKind::Ordinal,
+                        "score" => DecreeKind::Score,
                         "multilabel" => DecreeKind::Multilabel,
                         "tree" => DecreeKind::Tree,
                         _ => DecreeKind::Enum,
@@ -306,6 +311,52 @@ impl<'a> Parser<'a> {
                         Some(Tok::Probe) => backend = BackendKind::Probe,
                         _ => backend = BackendKind::Letter,
                     }
+                }
+                Some(Tok::Think) => {
+                    self.bump();
+                    let mut spec = ThinkSpec::default();
+                    if let Some(Tok::Ident(m)) = self.peek() {
+                        if matches!(m.as_str(), "auto" | "never" | "always") {
+                            spec.mode = self.ident()?;
+                        }
+                    }
+                    loop {
+                        match self.peek() {
+                            Some(Tok::Ident(k)) if k == "mode" => {
+                                self.bump();
+                                if matches!(self.peek(), Some(Tok::Eq)) {
+                                    self.bump();
+                                }
+                                spec.mode = match self.peek() {
+                                    Some(Tok::String(_)) => self.string()?,
+                                    _ => self.ident()?,
+                                };
+                            }
+                            Some(Tok::Ident(k)) if k == "gate" => {
+                                self.bump();
+                                if matches!(self.peek(), Some(Tok::Eq)) {
+                                    self.bump();
+                                }
+                                spec.gate = self.number()?;
+                            }
+                            Some(Tok::Ident(k)) if k == "budget" => {
+                                self.bump();
+                                if matches!(self.peek(), Some(Tok::Eq)) {
+                                    self.bump();
+                                }
+                                spec.budget = self.number()? as usize;
+                            }
+                            Some(Tok::Ident(k)) if k == "alpha" => {
+                                self.bump();
+                                if matches!(self.peek(), Some(Tok::Eq)) {
+                                    self.bump();
+                                }
+                                spec.alpha = self.number()?;
+                            }
+                            _ => break,
+                        }
+                    }
+                    think = Some(spec);
                 }
                 Some(Tok::Ident(_)) => {
                     let id = self.ident()?;
@@ -337,6 +388,7 @@ impl<'a> Parser<'a> {
             debias,
             tree: None,
             recipe: None,
+            think,
         })
     }
 
@@ -606,6 +658,12 @@ pub fn print_library(lib: &Library) -> String {
                 out.push_str(&format!("  abstain coverage {c} => return\n"));
             }
         }
+        if let Some(th) = &d.think {
+            out.push_str(&format!(
+                "  think {} gate {} budget {} alpha {}\n",
+                th.mode, th.gate, th.budget, th.alpha
+            ));
+        }
         for t in &d.tests {
             let st = t.state.as_str().unwrap_or("");
             out.push_str(&format!(
@@ -650,6 +708,7 @@ pub fn convert_to_toml(lib: &Library) -> Result<String> {
                 backend: d.backend.clone(),
                 debias: d.debias.clone(),
                 tree: d.tree.clone(),
+                think: d.think.clone(),
             },
         );
     }
@@ -710,5 +769,34 @@ program p {
         let fe = p.nodes[0].foreach.as_ref().expect("foreach");
         assert_eq!(fe.op, ForEachOp::Group);
         assert_eq!(fe.path, "items");
+    }
+
+    #[test]
+    fn parse_and_print_think_clause() {
+        let src = r#"
+recipe direct-options-v1
+decree promote_hold "Promote?" {
+  promote "Promote"
+  hold "Hold"
+  think auto gate 0.90 budget 256 alpha 0.75
+  test "ok" => promote
+}
+"#;
+        let lib = parse_library(src).unwrap();
+        let d = lib.decree("promote_hold").unwrap();
+        let th = d.think.as_ref().expect("think spec");
+        assert_eq!(th.mode, "auto");
+        assert!((th.gate - 0.90).abs() < 1e-12);
+        assert_eq!(th.budget, 256);
+        assert!((th.alpha - 0.75).abs() < 1e-12);
+
+        let printed = print_library(&lib);
+        assert!(printed.contains("think auto gate 0.9 budget 256 alpha 0.75"));
+        let reparsed = parse_library(&printed).unwrap();
+        assert_eq!(reparsed.decree("promote_hold").unwrap().think, d.think);
+
+        let toml_out = convert_to_toml(&lib).unwrap();
+        let from_toml = Library::load_from_toml_str(&toml_out).unwrap();
+        assert_eq!(from_toml.decree("promote_hold").unwrap().think, d.think);
     }
 }

@@ -1,5 +1,8 @@
 //! Per-workload temperature scaling (SemIf-style).
 //!
+//! Phase 3 adds per-question-type temperatures (`T_choice`, `T_noul`, `T_score`)
+//! with `T >= 1.0` policy for underconfident peers.
+//!
 //! Calibrated probs = softmax(option_logits / T). Argmax is invariant for T > 0.
 
 use crate::error::{Error, Result};
@@ -211,6 +214,49 @@ pub fn mean_family_balanced_accuracy(
         sum += balanced_accuracy(&p, &g, n_classes);
     }
     sum / nfam
+}
+
+/// Per-question-type temperatures for SystemOne (`T >= 1.0` softens overconfidence).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeTemperatures {
+    pub choice: f64,
+    pub noul: f64,
+    pub score: f64,
+}
+
+impl Default for TypeTemperatures {
+    fn default() -> Self {
+        Self {
+            choice: 1.0,
+            noul: 1.0,
+            score: 1.0,
+        }
+    }
+}
+
+impl TypeTemperatures {
+    pub fn for_kind(&self, kind: &str) -> f64 {
+        let t = match kind {
+            "noul" | "bool" => self.noul,
+            "score" | "ordinal" => self.score,
+            _ => self.choice,
+        };
+        t.max(1.0)
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Self {
+        let mut t = Self::default();
+        if let Some(x) = v.get("T_choice").and_then(|x| x.as_f64()) {
+            t.choice = x.max(1.0);
+        }
+        if let Some(x) = v.get("T_noul").and_then(|x| x.as_f64()) {
+            t.noul = x.max(1.0);
+        }
+        if let Some(x) = v.get("T_score").and_then(|x| x.as_f64()) {
+            t.score = x.max(1.0);
+        }
+        t
+    }
 }
 
 fn mean_nll(rows: &[(Vec<f64>, usize)], temperature: f64) -> Result<f64> {

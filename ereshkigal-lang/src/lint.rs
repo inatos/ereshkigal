@@ -49,6 +49,20 @@ pub fn lint_library(lib: &Library) -> Result<()> {
         if d.tests.is_empty() {
             errs.push(format!("{name}: decree has no tests"));
         }
+        if let Some(th) = &d.think {
+            if !matches!(th.mode.as_str(), "auto" | "never" | "always") {
+                errs.push(format!("{name}: unknown think.mode {}", th.mode));
+            }
+            if !(0.0..=1.0).contains(&th.gate) {
+                errs.push(format!("{name}: think.gate {} out of [0,1]", th.gate));
+            }
+            if !(0.0..=1.0).contains(&th.alpha) {
+                errs.push(format!("{name}: think.alpha {} out of [0,1]", th.alpha));
+            }
+            if th.mode != "never" && th.budget == 0 {
+                errs.push(format!("{name}: think.budget must be > 0"));
+            }
+        }
         for t in &d.tests {
             if d.option_index(&t.expect).is_none() && t.expect != "abstain" {
                 errs.push(format!("{name}: test expect {} not in options", t.expect));

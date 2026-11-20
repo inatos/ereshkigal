@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::tokenizer::ReferenceTokenizer;
 use crate::types::{GgufMeta, ModelMeta};
-use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::context::session::{LlamaStateSeqFlags, SeqState};
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -59,6 +59,7 @@ pub struct EngineOwned {
     pub meta: ModelMeta,
     pub gguf_path: PathBuf,
     pub n_seq_max: u32,
+    embeddings_enabled: bool,
 }
 
 unsafe impl Send for EngineOwned {}
@@ -87,13 +88,18 @@ impl EngineOwned {
         let model: &'static LlamaModel = Box::leak(Box::new(model));
 
         let n_seq_max = cfg.n_seq_max.max(1);
-        let ctx_tokens = (cfg.max_prompt_tokens as u32).saturating_add(64);
-        let ctx_params = LlamaContextParams::default()
+        // Parallel suffix decode needs prefix + n_seq_max * suffix headroom (NoKvCacheSlot).
+        let ctx_tokens = required_n_ctx(cfg.max_prompt_tokens as u32, n_seq_max, 64);
+        let mut ctx_params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(ctx_tokens))
             .with_n_threads(cfg.threads)
             .with_n_threads_batch(cfg.threads)
             .with_n_seq_max(n_seq_max)
             .with_embeddings(cfg.embeddings);
+        if cfg.embeddings {
+            // Per-token hidden states via llama_get_embeddings_ith require POOLING_TYPE_NONE.
+            ctx_params = ctx_params.with_pooling_type(LlamaPoolingType::None);
+        }
 
         let ctx = model
             .new_context(backend, ctx_params)
@@ -137,6 +143,7 @@ impl EngineOwned {
                 meta,
                 gguf_path: cfg.gguf,
                 n_seq_max,
+                embeddings_enabled: cfg.embeddings,
             },
             tokenizer,
         ))
@@ -205,6 +212,7 @@ impl EngineOwned {
                 self.n_seq_max
             )));
         }
+        // Caller must prefill/restore prefix on seq 0; do not clear here (wipes KV).
         for (i, suf) in suffixes.iter().enumerate() {
             if suf.is_empty() {
                 return Err(Error::Engine(format!("empty suffix at {i}")));
@@ -243,6 +251,102 @@ impl EngineOwned {
         Ok(out)
     }
 
+    /// Decode `tokens` from position 0 on seq 0 and extract vocabulary logits at
+    /// each requested token index in `read_positions` via `get_logits_ith`.
+    /// When `tokens.len() <= ctx.n_batch()`, submits all tokens in one `LlamaBatch`.
+    pub fn decode_logits_at_positions(
+        &mut self,
+        tokens: &[i32],
+        read_positions: &[usize],
+    ) -> Result<Vec<Vec<f32>>> {
+        if tokens.is_empty() {
+            return Err(Error::Engine(
+                "Refusing to decode an empty token list".into(),
+            ));
+        }
+        if read_positions.is_empty() {
+            return Err(Error::Engine(
+                "Refusing to decode with empty read_positions".into(),
+            ));
+        }
+        let total = tokens.len();
+        let mut want_mask = vec![false; total];
+        for &pos in read_positions {
+            if pos >= total {
+                return Err(Error::Engine(format!(
+                    "read_position {pos} out of bounds for {total} tokens"
+                )));
+            }
+            want_mask[pos] = true;
+        }
+
+        self.clear();
+        let n_vocab = self.model.n_vocab() as usize;
+        let chunk_cap = (self.ctx.n_batch() as usize).max(1).min(total);
+        let mut batch = LlamaBatch::new(chunk_cap, self.n_seq_max.max(1) as i32);
+        let mut out: Vec<Option<Vec<f32>>> = vec![None; read_positions.len()];
+
+        for offset in (0..total).step_by(chunk_cap) {
+            let end = (offset + chunk_cap).min(total);
+            let chunk = &tokens[offset..end];
+            batch.clear();
+            for (i, &tok) in chunk.iter().enumerate() {
+                let global_pos = offset + i;
+                batch
+                    .add(
+                        LlamaToken(tok),
+                        global_pos as i32,
+                        &[0],
+                        want_mask[global_pos],
+                    )
+                    .map_err(|e| Error::Engine(format!("batch.add: {e}")))?;
+            }
+            self.ctx.decode(&mut batch).map_err(|e| {
+                Error::Engine(format!(
+                    "joint llama_decode failed; raise --max-tokens if prompts grew: {e}"
+                ))
+            })?;
+            for (slot_idx, &pos) in read_positions.iter().enumerate() {
+                if pos >= offset && pos < end {
+                    let local_i = (pos - offset) as i32;
+                    let logits = self.ctx.get_logits_ith(local_i);
+                    if logits.len() < n_vocab {
+                        return Err(Error::Engine(
+                            "llama.cpp returned short joint logits".into(),
+                        ));
+                    }
+                    out[slot_idx] = Some(logits[..n_vocab].to_vec());
+                }
+            }
+        }
+
+        out.into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                v.ok_or_else(|| {
+                    Error::Engine(format!("missing logits for read_position index {i}"))
+                })
+            })
+            .collect()
+    }
+
+    /// Model's end-of-sequence token id.
+    pub fn eos_token(&self) -> i32 {
+        self.model.vocab().eos().0
+    }
+
+    /// Whether `token` is an end-of-generation token (EOS, EOT, etc.).
+    pub fn is_eog_token(&self, token: i32) -> bool {
+        self.model.vocab().is_eog(LlamaToken(token))
+    }
+
+    /// Single-token id for `"</think>"` when the model vocabulary encodes it as one token.
+    pub fn think_end_token(&self) -> Option<i32> {
+        self.gguf_tokenize("</think>")
+            .ok()
+            .and_then(|v| (v.len() == 1).then_some(v[0]))
+    }
+
     pub fn gguf_tokenize(&self, text: &str) -> Result<Vec<i32>> {
         let tokens = self.model.vocab().tokenize(text.as_bytes(), false, true);
         Ok(tokens.into_iter().map(|t| t.0).collect())
@@ -254,6 +358,115 @@ impl EngineOwned {
             .or_else(|_| self.ctx.embeddings_ith(0))
             .map(|s| s.to_vec())
             .map_err(|e| Error::Engine(format!("embeddings: {e}")))
+    }
+
+    pub fn embeddings_enabled(&self) -> bool {
+        self.embeddings_enabled
+    }
+
+    pub fn n_embd(&self) -> usize {
+        self.model.n_embd() as usize
+    }
+
+    pub fn n_batch(&self) -> u32 {
+        self.ctx.n_batch()
+    }
+
+    #[cfg(feature = "vision")]
+    pub(crate) fn llama_model(&self) -> &'static LlamaModel {
+        self.model
+    }
+
+    #[cfg(feature = "vision")]
+    pub(crate) fn llama_context(&self) -> &LlamaContext<'static> {
+        &self.ctx
+    }
+
+    #[cfg(feature = "vision")]
+    pub(crate) fn last_vocab_logits(&self) -> Result<Vec<f32>> {
+        let n_vocab = self.model.n_vocab() as usize;
+        let logits = self.ctx.get_logits();
+        if logits.len() < n_vocab {
+            return Err(Error::Engine("llama.cpp returned short logits".into()));
+        }
+        Ok(logits[..n_vocab].to_vec())
+    }
+
+    /// Decode `tokens` from position 0 on seq 0 and extract per-token hidden
+    /// embeddings at each requested token index in `positions` via `embeddings_ith`.
+    /// Requires the engine to have been loaded with `EngineConfig.embeddings = true`.
+    pub fn token_embeddings_at(
+        &mut self,
+        tokens: &[i32],
+        positions: &[usize],
+    ) -> Result<Vec<Vec<f32>>> {
+        if !self.embeddings_enabled {
+            return Err(Error::Engine(
+                "embeddings not enabled on EngineOwned (set EngineConfig.embeddings = true)".into(),
+            ));
+        }
+        if tokens.is_empty() {
+            return Err(Error::Engine(
+                "Refusing to decode an empty token list".into(),
+            ));
+        }
+        if positions.is_empty() {
+            return Err(Error::Engine(
+                "Refusing to extract embeddings with empty positions".into(),
+            ));
+        }
+        let total = tokens.len();
+        let mut want_mask = vec![false; total];
+        for &pos in positions {
+            if pos >= total {
+                return Err(Error::Engine(format!(
+                    "embedding position {pos} out of bounds for {total} tokens"
+                )));
+            }
+            want_mask[pos] = true;
+        }
+
+        self.clear();
+        let chunk_cap = (self.ctx.n_batch() as usize).max(1).min(total);
+        let mut batch = LlamaBatch::new(chunk_cap, self.n_seq_max.max(1) as i32);
+        let mut out: Vec<Option<Vec<f32>>> = vec![None; positions.len()];
+
+        for offset in (0..total).step_by(chunk_cap) {
+            let end = (offset + chunk_cap).min(total);
+            let chunk = &tokens[offset..end];
+            batch.clear();
+            for (i, &tok) in chunk.iter().enumerate() {
+                let global_pos = offset + i;
+                batch
+                    .add(
+                        LlamaToken(tok),
+                        global_pos as i32,
+                        &[0],
+                        want_mask[global_pos],
+                    )
+                    .map_err(|e| Error::Engine(format!("batch.add: {e}")))?;
+            }
+            self.ctx
+                .decode(&mut batch)
+                .map_err(|e| Error::Engine(format!("embeddings llama_decode failed: {e}")))?;
+            for (slot_idx, &pos) in positions.iter().enumerate() {
+                if pos >= offset && pos < end {
+                    let local_i = (pos - offset) as i32;
+                    let emb = self
+                        .ctx
+                        .embeddings_ith(local_i)
+                        .map_err(|e| Error::Engine(format!("embeddings_ith({local_i}): {e}")))?;
+                    out[slot_idx] = Some(emb.to_vec());
+                }
+            }
+        }
+
+        out.into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                v.ok_or_else(|| Error::Engine(format!("missing embedding for position index {i}")))
+            })
+            .collect()
     }
 
     pub fn gguf_chat_template(&self) -> Result<String> {
@@ -383,9 +596,61 @@ fn verify_vocab_agreement(tokenizer: &ReferenceTokenizer, model: &LlamaModel) ->
     Ok(())
 }
 
+/// KV context size needed so parallel suffix decode does not hit NoKvCacheSlot.
+/// `max_suffix_tokens` is the per-seq suffix headroom reserved beyond the shared prefix.
+pub fn required_n_ctx(max_prompt_tokens: u32, n_seq_max: u32, max_suffix_tokens: u32) -> u32 {
+    let seqs = n_seq_max.max(1);
+    let suffix = max_suffix_tokens.max(1);
+    max_prompt_tokens
+        .saturating_add(seqs.saturating_mul(suffix))
+        .saturating_add(64)
+}
+
+/// Deterministic head+tail truncation when a prompt exceeds `max_tokens`.
+/// Keeps the first `head` and last `tail` tokens (head+tail == max_tokens when truncated).
+pub fn truncate_tokens_head_tail(tokens: &[i32], max_tokens: usize) -> Vec<i32> {
+    if tokens.len() <= max_tokens || max_tokens == 0 {
+        return tokens.to_vec();
+    }
+    if max_tokens == 1 {
+        return vec![tokens[0]];
+    }
+    let head = max_tokens / 2;
+    let tail = max_tokens - head;
+    let mut out = Vec::with_capacity(max_tokens);
+    out.extend_from_slice(&tokens[..head]);
+    out.extend_from_slice(&tokens[tokens.len() - tail..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn n_ctx_budget_covers_parallel_suffixes_vs_legacy() {
+        let max_prompt = 2048u32;
+        let n_seq = 8u32;
+        let max_suffix = 64u32;
+        let need = required_n_ctx(max_prompt, n_seq, max_suffix);
+        let legacy = max_prompt.saturating_add(64);
+        assert_eq!(need, max_prompt + n_seq * max_suffix + 64);
+        assert!(
+            need > legacy,
+            "legacy n_ctx={legacy} under-sizes parallel KV need={need} (NoKvCacheSlot risk)"
+        );
+    }
+
+    #[test]
+    fn truncate_tokens_head_tail_preserves_ends() {
+        let toks: Vec<i32> = (0..20).collect();
+        let out = truncate_tokens_head_tail(&toks, 10);
+        assert_eq!(out.len(), 10);
+        assert_eq!(&out[..5], &[0, 1, 2, 3, 4]);
+        assert_eq!(&out[5..], &[15, 16, 17, 18, 19]);
+        assert_eq!(truncate_tokens_head_tail(&toks, 20), toks);
+        assert_eq!(truncate_tokens_head_tail(&toks, 0), toks);
+    }
 
     /// Two loads in one process used to fail with BackendAlreadyInitialized.
     /// Skips when ERESHKIGAL_GGUF is unset.

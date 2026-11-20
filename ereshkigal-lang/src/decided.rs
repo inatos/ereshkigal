@@ -33,6 +33,12 @@ pub struct Decided {
     pub backend: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_hit: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think_invoked: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p0_vs_p1_flipped: Option<bool>,
 }
 
 impl Decided {

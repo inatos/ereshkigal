@@ -28,12 +28,19 @@ if [[ -f "$ICD" ]]; then
   export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-$ICD}"
   export VK_DRIVER_FILES="${VK_DRIVER_FILES:-$ICD}"
 fi
-echo "[ab_vulkan_smoke] GGUF=$GGUF INPUT=$INPUT N_GPU_LAYERS=$N_GPU_LAYERS AB_MAX_DP=$AB_MAX_DP BIN=$BIN"
+MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
+REV="${REV:-c1899de289a04d12100db370d81485cdf75e47ca}"
+if [[ "$GGUF" == *Qwen3.5-4B* || "$GGUF" == *qwen35* ]]; then
+  MODEL="Qwen/Qwen3.5-4B"
+  REV="851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+fi
+echo "[ab_vulkan_smoke] GGUF=$GGUF INPUT=$INPUT N_GPU_LAYERS=$N_GPU_LAYERS AB_MAX_DP=$AB_MAX_DP BIN=$BIN MODEL=$MODEL"
 # Run Esk only if SemIf venv missing — still check argmax self-consistency via SHA length.
 OUT_E="$ROOT/results/ab_vulkan_smoke_ereshkigal.jsonl"
 rm -f "$OUT_E"
 "$BIN" --mode direct --gguf "$GGUF" --input "$INPUT" --output "$OUT_E" \
-  --llama-threads "${LLAMA_THREADS:-8}" --n-gpu-layers "$N_GPU_LAYERS" --no-replay
+  --llama-threads "${LLAMA_THREADS:-8}" --n-gpu-layers "$N_GPU_LAYERS" --no-replay \
+  --model "$MODEL" --revision "$REV"
 python3 - <<PY
 import json, sys
 from pathlib import Path

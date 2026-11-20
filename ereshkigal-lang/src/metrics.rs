@@ -149,6 +149,41 @@ pub fn argmax_correct(probs: &[f64], gold: usize) -> bool {
     argmax(probs) == Some(gold)
 }
 
+/// Brier score for a categorical distribution vs one-hot gold index (lower better).
+pub fn brier(probs: &[f64], gold: usize) -> f64 {
+    if probs.is_empty() {
+        return 1.0;
+    }
+    let mut s = 0.0;
+    for (i, p) in probs.iter().enumerate() {
+        let y = if i == gold { 1.0 } else { 0.0 };
+        s += (p - y).powi(2);
+    }
+    s
+}
+
+/// Ranked Probability Score for ordinal outcomes (lower better).
+pub fn rps(probs: &[f64], gold: usize) -> f64 {
+    if probs.is_empty() {
+        return 1.0;
+    }
+    let n = probs.len();
+    let mut cum_p = 0.0;
+    let mut score = 0.0;
+    for k in 0..n {
+        cum_p += probs[k];
+        let cum_y = if gold <= k { 1.0 } else { 0.0 };
+        score += (cum_p - cum_y).powi(2);
+    }
+    score / n as f64
+}
+
+/// Mean negative log-likelihood of gold under probs.
+pub fn nll(probs: &[f64], gold: usize) -> f64 {
+    let p = probs.get(gold).copied().unwrap_or(0.0).max(1e-12);
+    -p.ln()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +209,13 @@ mod tests {
     fn kendall_identity() {
         let o = vec![0, 1, 2];
         assert!((kendall_tau(&o, &o) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn brier_rps_perfect() {
+        let probs = vec![0.0, 1.0, 0.0];
+        assert!(brier(&probs, 1) < 1e-12);
+        assert!(rps(&probs, 1) < 1e-12);
+        assert!(nll(&probs, 1) < 1e-9);
     }
 }

@@ -50,6 +50,16 @@ impl ReferenceTokenizer {
         Ok(encoding.get_ids().iter().map(|&id| id as i32).collect())
     }
 
+    pub fn encode_ids_with_offsets(&self, text: &str) -> Result<(Vec<i32>, Vec<(usize, usize)>)> {
+        let encoding = self
+            .inner
+            .encode(text, false)
+            .map_err(|e| Error::Tokenizer(e.to_string()))?;
+        let ids = encoding.get_ids().iter().map(|&id| id as i32).collect();
+        let offsets = encoding.get_offsets().to_vec();
+        Ok((ids, offsets))
+    }
+
     pub fn encode_decision(&self, row: &DecisionRow, max_tokens: usize) -> Result<EncodedDecision> {
         self.encode_decision_version(row, max_tokens, crate::types::PROMPT_VERSION)
     }
@@ -61,24 +71,28 @@ impl ReferenceTokenizer {
         prompt_version: &str,
     ) -> Result<EncodedDecision> {
         let prompt = crate::prompt::render_prompt_version(row, prompt_version)?;
-        let ids = self.encode_ids(&prompt)?;
-        if ids.is_empty() || ids.len() > max_tokens {
+        let mut ids = self.encode_ids(&prompt)?;
+        if ids.is_empty() {
             return Err(Error::Validation(format!(
-                "Row {}: {} input tokens exceed limit {}; no truncation allowed",
-                row.id,
-                ids.len(),
-                max_tokens
+                "Row {}: tokenizer produced no tokens",
+                row.id
             )));
         }
+        let truncated = ids.len() > max_tokens && max_tokens > 0;
+        if truncated {
+            ids = crate::engine::truncate_tokens_head_tail(&ids, max_tokens);
+        }
         let slots = self.slot_ids(row.options.len())?;
-        for (letter, &token) in LETTERS.chars().zip(slots.iter()) {
-            let with_letter = self.encode_ids(&format!("{prompt}{letter}"))?;
-            let mut expected = ids.clone();
-            expected.push(token);
-            if with_letter != expected {
-                return Err(Error::Validation(format!(
-                    "Answer boundary changes tokenization for slot {letter}"
-                )));
+        if !truncated {
+            for (letter, &token) in LETTERS.chars().zip(slots.iter()) {
+                let with_letter = self.encode_ids(&format!("{prompt}{letter}"))?;
+                let mut expected = ids.clone();
+                expected.push(token);
+                if with_letter != expected {
+                    return Err(Error::Validation(format!(
+                        "Answer boundary changes tokenization for slot {letter}"
+                    )));
+                }
             }
         }
         Ok(EncodedDecision {
@@ -103,7 +117,7 @@ impl ReferenceTokenizer {
         Ok(ids)
     }
 
-    fn slot_ids(&self, count: usize) -> Result<Vec<i32>> {
+    pub fn slot_ids(&self, count: usize) -> Result<Vec<i32>> {
         let mut result = Vec::with_capacity(count);
         for letter in LETTERS.chars().take(count) {
             let encoded = self.encode_ids(&letter.to_string())?;
@@ -123,6 +137,33 @@ impl ReferenceTokenizer {
         }
         Ok(result)
     }
+}
+
+/// Map strictly increasing prompt byte offsets (e.g. each FIELD's `ANSWER:` colon)
+/// to their covering token indices in `offsets`. Returns `None` if any byte offset
+/// cannot be uniquely mapped to a strictly increasing token index.
+pub fn locate_token_positions(
+    offsets: &[(usize, usize)],
+    byte_offsets: &[usize],
+) -> Option<Vec<usize>> {
+    if byte_offsets.is_empty() {
+        return None;
+    }
+    let mut positions = Vec::with_capacity(byte_offsets.len());
+    let mut search_from = 0usize;
+    for &byte_off in byte_offsets {
+        let mut found = None;
+        for (idx, &(start, end)) in offsets.iter().enumerate().skip(search_from) {
+            if start < end && start <= byte_off && byte_off < end {
+                found = Some(idx);
+                break;
+            }
+        }
+        let pos = found?;
+        positions.push(pos);
+        search_from = pos + 1;
+    }
+    Some(positions)
 }
 
 #[cfg(test)]
@@ -184,5 +225,58 @@ mod tests {
         let prefix = tok.state_prefix_ids(&row).unwrap();
         assert_eq!(prefix.len(), 65);
         assert_eq!(&enc.token_ids[..prefix.len()], prefix.as_slice());
+    }
+
+    #[test]
+    fn locate_token_positions_maps_strictly_increasing_spans() {
+        let offsets = vec![(0, 6), (6, 12), (12, 13), (13, 20), (20, 22)];
+        assert_eq!(locate_token_positions(&offsets, &[12, 20]), Some(vec![2, 4]));
+        // Duplicate/out-of-order byte offsets in the same token fail cleanly.
+        assert_eq!(locate_token_positions(&offsets, &[20, 21]), None);
+        assert_eq!(locate_token_positions(&offsets, &[99]), None);
+        assert_eq!(locate_token_positions(&offsets, &[]), None);
+    }
+
+    #[test]
+    fn joint_prompt_colon_offsets_locate_in_qwen3_tokenizer() {
+        let pack_tok = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../packs/qwen3-0.6b-lora-dev/tokenizer.json");
+        let tok = if pack_tok.is_file() {
+            ReferenceTokenizer::from_file(pack_tok, "Qwen/Qwen3-0.6B".into(), "local".into()).ok()
+        } else {
+            cached_tokenizer()
+        };
+        let Some(tok) = tok else {
+            eprintln!("skip: no local Qwen3 tokenizer.json");
+            return;
+        };
+        let state = json!("Server metrics: CPU 12%, latency 4ms, zero errors.");
+        let rows = vec![
+            DecisionRow {
+                id: "q1".into(),
+                state: state.clone(),
+                question: "Is latency healthy?".into(),
+                options: vec![
+                    OptionSpec { id: "yes".into(), description: "Yes.".into() },
+                    OptionSpec { id: "no".into(), description: "No.".into() },
+                ],
+            },
+            DecisionRow {
+                id: "q2".into(),
+                state: state.clone(),
+                question: "Are there errors?".into(),
+                options: vec![
+                    OptionSpec { id: "yes".into(), description: "Yes.".into() },
+                    OptionSpec { id: "no".into(), description: "No.".into() },
+                ],
+            },
+        ];
+        let (prompt, colons) =
+            crate::prompt::render_joint_batch_prompt_with_offsets(&state, &rows).unwrap();
+        let (ids, offsets) = tok.encode_ids_with_offsets(&prompt).unwrap();
+        let positions = locate_token_positions(&offsets, &colons).expect("colon token positions");
+        assert_eq!(positions.len(), 2);
+        assert!(positions[0] < positions[1]);
+        assert!(positions[1] < ids.len());
     }
 }

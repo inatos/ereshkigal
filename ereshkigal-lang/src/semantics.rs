@@ -124,6 +124,7 @@ mod tests {
             debias: Default::default(),
             tree: None,
             recipe: None,
+            think: None,
         }
     }
 

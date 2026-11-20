@@ -17,5 +17,7 @@ mod tests {
     fn schema_mentions_decrees() {
         let s = library_schema_json().unwrap();
         assert!(s.contains("decrees") || s.contains("LibraryFile"));
+        assert!(s.contains("ThinkSpec"));
+        assert!(s.contains("\"think\""));
     }
 }

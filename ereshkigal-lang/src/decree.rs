@@ -15,7 +15,11 @@ pub enum DecreeKind {
     #[default]
     Enum,
     Bool,
+    /// Alias surface for boolean / P(true) noul decisions (TypeSafe SystemOne).
+    Noul,
     Ordinal,
+    /// Alias surface for ordinal rubric scoring (TypeSafe SystemOne `score`).
+    Score,
     Multilabel,
     Tree,
 }
@@ -85,6 +89,45 @@ pub struct TreeGroup {
     pub children: Vec<String>,
 }
 
+fn default_think_mode() -> String {
+    "auto".into()
+}
+
+fn default_think_gate() -> f64 {
+    0.90
+}
+
+fn default_think_budget() -> usize {
+    256
+}
+
+fn default_think_alpha() -> f64 {
+    0.75
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ThinkSpec {
+    #[serde(default = "default_think_mode")]
+    pub mode: String,
+    #[serde(default = "default_think_gate")]
+    pub gate: f64,
+    #[serde(default = "default_think_budget")]
+    pub budget: usize,
+    #[serde(default = "default_think_alpha")]
+    pub alpha: f64,
+}
+
+impl Default for ThinkSpec {
+    fn default() -> Self {
+        Self {
+            mode: default_think_mode(),
+            gate: default_think_gate(),
+            budget: default_think_budget(),
+            alpha: default_think_alpha(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct Decree {
     pub name: String,
@@ -112,6 +155,8 @@ pub struct Decree {
     pub tree: Option<Vec<TreeGroup>>,
     #[serde(default)]
     pub recipe: Option<String>,
+    #[serde(default)]
+    pub think: Option<ThinkSpec>,
 }
 
 impl Decree {
@@ -257,6 +302,8 @@ pub struct DecreeFileEntry {
     pub debias: DebiasMode,
     #[serde(default)]
     pub tree: Option<Vec<TreeGroup>>,
+    #[serde(default)]
+    pub think: Option<ThinkSpec>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -359,6 +406,7 @@ impl Library {
                 debias: e.debias,
                 tree: e.tree,
                 recipe: Some(self.recipe.clone()),
+                think: e.think,
             };
             if self.decrees.insert(name.clone(), d).is_some() {
                 return Err(Error::Validation(format!("duplicate decree {name}")));
@@ -448,5 +496,59 @@ options = [
 "#;
         let lib = Library::load_from_toml_str(src).unwrap();
         assert!(lib.decree("x").is_ok());
+        assert!(lib.decree("x").unwrap().think.is_none());
+    }
+
+    #[test]
+    fn toml_think_spec_defaults_and_explicit() {
+        let src = r#"
+recipe = "direct-options-v1"
+[decrees.with_defaults]
+question = "Q?"
+options = [
+  { id = "a", description = "A" },
+  { id = "b", description = "B" },
+]
+think = {}
+
+[decrees.with_explicit]
+question = "Q2?"
+options = [
+  { id = "a", description = "A" },
+  { id = "b", description = "B" },
+]
+think = { mode = "always", gate = 0.85, budget = 128, alpha = 0.6 }
+"#;
+        let lib = Library::load_from_toml_str(src).unwrap();
+        let d_def = lib.decree("with_defaults").unwrap().think.as_ref().unwrap();
+        assert_eq!(d_def.mode, "auto");
+        assert!((d_def.gate - 0.90).abs() < 1e-12);
+        assert_eq!(d_def.budget, 256);
+        assert!((d_def.alpha - 0.75).abs() < 1e-12);
+
+        let d_exp = lib.decree("with_explicit").unwrap().think.as_ref().unwrap();
+        assert_eq!(d_exp.mode, "always");
+        assert!((d_exp.gate - 0.85).abs() < 1e-12);
+        assert_eq!(d_exp.budget, 128);
+        assert!((d_exp.alpha - 0.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn conduit_library_loads_with_autothink_specs() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../decrees");
+        if !path.is_dir() {
+            return;
+        }
+        let lib = Library::load(&path).expect("load decrees library");
+        let want = ThinkSpec {
+            mode: "auto".into(),
+            gate: 0.90,
+            budget: 256,
+            alpha: 0.75,
+        };
+        for name in ["promote_hold", "continuity_check", "conduit_route"] {
+            let d = lib.decree(name).unwrap();
+            assert_eq!(d.think.as_ref(), Some(&want), "decree {name}");
+        }
     }
 }

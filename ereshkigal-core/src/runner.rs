@@ -48,14 +48,43 @@ impl Runtime {
     }
 
     fn score_decree(&mut self, decree: &crate::decree::Decree, row: &DecisionRow) -> Result<Decided> {
-        let mut result = self.scorer.score_direct(row)?;
-        if let Some(t) = self.temperature {
-            result.calibrated_probabilities = Some(crate::apply_temperature(&result.option_logits, t)?);
+        let (mut result, think_outcome) = if let Some(spec) = &decree.think {
+            let cfg = crate::autothink::ThinkConfig::from_spec(spec);
+            if cfg.mode != crate::autothink::ThinkMode::Never {
+                let qhat = self.conformal_qhat.get(&decree.name).copied();
+                let (res, out) = self
+                    .scorer
+                    .score_autothink_conformal(row, &cfg, qhat, self.temperature)?;
+                (res, Some(out))
+            } else {
+                (self.scorer.score_direct(row)?, None)
+            }
+        } else {
+            (self.scorer.score_direct(row)?, None)
+        };
+        let think_invoked = think_outcome.as_ref().map(|o| o.think_invoked).unwrap_or(false);
+        let think_tokens = think_outcome.as_ref().map(|o| o.think_tokens).unwrap_or(0);
+        let p0_vs_p1_flipped = think_outcome
+            .as_ref()
+            .map(|o| o.p0_vs_p1_flipped)
+            .unwrap_or(false);
+        if !think_invoked {
+            if let Some(t) = self.temperature {
+                result.calibrated_probabilities =
+                    Some(crate::apply_temperature(&result.option_logits, t)?);
+            }
         }
-        let probs = result
-            .calibrated_probabilities
-            .clone()
-            .unwrap_or_else(|| result.probabilities.clone());
+        let probs = if think_invoked {
+            think_outcome
+                .as_ref()
+                .map(|o| o.probs.clone())
+                .unwrap_or_else(|| result.probabilities.clone())
+        } else {
+            result
+                .calibrated_probabilities
+                .clone()
+                .unwrap_or_else(|| result.probabilities.clone())
+        };
         let mut idx = argmax(&probs);
         let fitted = self.fitted_margins.get(&decree.name).copied();
         let mut status = status_for(decree, &probs, fitted);
@@ -93,6 +122,9 @@ impl Runtime {
             prompt_sha256: result.prompt_sha256,
             backend: format!("{:?}", decree.backend),
             cache_hit: result.cache_hit,
+            think_invoked: Some(think_invoked),
+            think_tokens: Some(think_tokens),
+            p0_vs_p1_flipped: Some(p0_vs_p1_flipped),
         })
     }
 
@@ -183,6 +215,9 @@ impl Runtime {
             prompt_sha256: String::new(),
             backend: "multilabel".into(),
             cache_hit: None,
+            think_invoked: Some(false),
+            think_tokens: Some(0),
+            p0_vs_p1_flipped: Some(false),
         })
     }
 

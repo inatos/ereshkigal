@@ -11,6 +11,7 @@ options = [
 ]
 abstain = { coverage = 0.8 }
 on_abstain = "return"
+think = { mode = "auto", gate = 0.90, budget = 256, alpha = 0.75 }
 
 [[decrees.promote_hold.tests]]
 state = "Cast metrics passed. Filmstrip read found no contradictions. The author accepted the take."
@@ -128,6 +129,7 @@ options = [
 ]
 abstain = { coverage = 0.8 }
 on_abstain = "return"
+think = { mode = "auto", gate = 0.90, budget = 256, alpha = 0.75 }
 
 [[decrees.continuity_check.tests]]
 state = "Pinned canon says Fulcanus is the Edict master. The proposed beat says the same."
@@ -166,6 +168,7 @@ options = [
 ]
 abstain = { coverage = 0.8 }
 on_abstain = "return"
+think = { mode = "auto", gate = 0.90, budget = 256, alpha = 0.75 }
 
 [[decrees.conduit_route.tests]]
 state = "Inatos wants a Wispfire scene checked against the Atheneum before any new fact."

@@ -1,0 +1,38 @@
+{
+  "license": "Apache-2.0",
+  "notes": "Permissive training pack for standalone OSS ereshkigal releases. Restricted internal weights stay under gitignored .wordkeep/models/.",
+  "prompt_version": "direct-options-v1",
+  "base_models": [
+    {
+      "id": "qwen3-0.6b",
+      "hf": "Qwen/Qwen3-0.6B",
+      "license": "Apache-2.0",
+      "gguf_example": "Qwen/Qwen3-0.6B-GGUF"
+    },
+    {
+      "id": "qwen3.5-4b",
+      "hf": "Qwen/Qwen3.5-4B",
+      "license": "Apache-2.0",
+      "gguf_example": "unsloth/Qwen3.5-4B-GGUF"
+    }
+  ],
+  "datasets": [
+    {
+      "id": "betwixt-decrees-synthetic",
+      "path": "fixtures/",
+      "license": "MIT",
+      "notes": "In-repo decree gold / authored fixtures"
+    },
+    {
+      "id": "opendecisions-public",
+      "url": "https://huggingface.co/datasets",
+      "license": "Apache-2.0",
+      "notes": "Prefer Apache/MIT public decision corpora only"
+    }
+  ],
+  "serving": {
+    "backend": "llamacpp",
+    "attention": "causal",
+    "max_prompt_tokens": 4096
+  }
+}
