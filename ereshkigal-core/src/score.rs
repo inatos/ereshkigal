@@ -466,9 +466,21 @@ impl Scorer {
             && suffixes.len() as u32 <= self.engine.n_seq_max
         {
             let mark = Instant::now();
-            let v = self
+            let v = match self
                 .engine
-                .decode_suffixes_parallel(prefix.len(), &suffixes)?;
+                .decode_suffixes_parallel(prefix.len(), &suffixes)
+            {
+                Ok(v) => v,
+                Err(e) if crate::engine::EngineOwned::error_is_kv_slot(&e) => {
+                    // Single clear-and-retry: wipe every seq, restore prefix, try
+                    // once more before the caller falls back to heuristic.
+                    self.engine.clear_all_seqs()?;
+                    self.engine.restore_state(&state)?;
+                    self.engine
+                        .decode_suffixes_parallel(prefix.len(), &suffixes)?
+                }
+                Err(e) => return Err(e),
+            };
             suffix_seconds = mark.elapsed().as_secs_f64();
             v
         } else {
@@ -478,7 +490,16 @@ impl Scorer {
                 self.engine.restore_state(&state)?;
                 copy_seconds += mark.elapsed().as_secs_f64();
                 let mark = Instant::now();
-                vs.push(self.engine.branch_logits(prefix.len(), suf)?);
+                let logits = match self.engine.branch_logits(prefix.len(), suf) {
+                    Ok(v) => v,
+                    Err(e) if crate::engine::EngineOwned::error_is_kv_slot(&e) => {
+                        self.engine.clear_all_seqs()?;
+                        self.engine.restore_state(&state)?;
+                        self.engine.branch_logits(prefix.len(), suf)?
+                    }
+                    Err(e) => return Err(e),
+                };
+                vs.push(logits);
                 suffix_seconds += mark.elapsed().as_secs_f64();
             }
             vs

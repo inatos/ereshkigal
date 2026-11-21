@@ -32,7 +32,9 @@ pub use cascade::{
     speculative_tree_verify, top2_margin, CascadeOutcome, SpeculativeTreeOutcome,
 };
 pub use cosine_head::CosineHead;
-pub use engine::{required_n_ctx, truncate_tokens_head_tail, EngineConfig, EngineOwned};
+pub use engine::{
+    required_n_ctx, truncate_tokens_head_tail, EngineConfig, EngineOwned, DEFAULT_MAX_SUFFIX_TOKENS,
+};
 pub use gbnf::{letter_gbnf, slots_match_letters};
 pub use outline::outline_state;
 pub use runner::Runtime;

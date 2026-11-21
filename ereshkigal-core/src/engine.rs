@@ -17,6 +17,11 @@ use std::pin::pin;
 use std::sync::OnceLock;
 
 const DECODE_CHUNK: usize = 512;
+/// Per-seq suffix KV headroom beyond the shared prefix. Option labels in
+/// Wordkeep `semantic_decide` / adaptive decrees routinely exceed 64 tokens
+/// (criteria + rationale); undersizing here surfaces as llama.cpp
+/// `NoKvCacheSlot` and forces heuristic fallback.
+pub const DEFAULT_MAX_SUFFIX_TOKENS: u32 = 256;
 
 /// llama.cpp allows one `llama_backend_init` per process. Wordkeep tandem (GPU
 /// draft + CPU draft) and draft+verify need multiple models, so we leak the
@@ -89,7 +94,8 @@ impl EngineOwned {
 
         let n_seq_max = cfg.n_seq_max.max(1);
         // Parallel suffix decode needs prefix + n_seq_max * suffix headroom (NoKvCacheSlot).
-        let ctx_tokens = required_n_ctx(cfg.max_prompt_tokens as u32, n_seq_max, 64);
+        let max_suffix = DEFAULT_MAX_SUFFIX_TOKENS;
+        let ctx_tokens = required_n_ctx(cfg.max_prompt_tokens as u32, n_seq_max, max_suffix);
         let mut ctx_params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(ctx_tokens))
             .with_n_threads(cfg.threads)
@@ -153,6 +159,31 @@ impl EngineOwned {
         self.ctx.clear_kv_cache();
     }
 
+    /// Drop every sequence slot (`0..n_seq_max`) so parallel/adaptive waves
+    /// never leak occupied KV cells into the next restore/copy.
+    pub fn clear_all_seqs(&mut self) -> Result<()> {
+        for seq in 0..self.n_seq_max {
+            let ok = self
+                .ctx
+                .clear_kv_cache_seq(Some(seq), None, None)
+                .map_err(|e| Error::Engine(e.to_string()))?;
+            if !ok {
+                // Fall back to a full wipe once rather than leaving a half-cleared cache.
+                self.clear();
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn is_kv_slot_error(msg: &str) -> bool {
+        let lower = msg.to_ascii_lowercase();
+        lower.contains("nokvcacheslot")
+            || lower.contains("no kv cache slot")
+            || lower.contains("failed to find a kv slot")
+            || lower.contains("kv cache is full")
+    }
+
     pub fn full_logits(&mut self, tokens: &[i32]) -> Result<Vec<f32>> {
         self.clear();
         self.decode_logits_seq(tokens, 0, 0)
@@ -170,15 +201,9 @@ impl EngineOwned {
     }
 
     pub fn restore_state(&mut self, state: &SeqState) -> Result<()> {
-        let ok = self
-            .ctx
-            .clear_kv_cache_seq(Some(0), None, None)
-            .map_err(|e| Error::Engine(e.to_string()))?;
-        if !ok {
-            return Err(Error::Engine(
-                "llama.cpp could not drop the previous scored branch".into(),
-            ));
-        }
+        // Clear *all* seq slots first — leftover parallel copies on 1..n-1
+        // otherwise keep KV cells occupied and the next wave hits NoKvCacheSlot.
+        self.clear_all_seqs()?;
         self.ctx
             .state_seq_set(state, 0)
             .map_err(|e| Error::Engine(format!("state_seq_set: {e}")))
@@ -212,7 +237,36 @@ impl EngineOwned {
                 self.n_seq_max
             )));
         }
-        // Caller must prefill/restore prefix on seq 0; do not clear here (wipes KV).
+        // Cap each suffix to the reserved headroom so we never request more KV
+        // cells than `required_n_ctx` budgeted at load time.
+        let capped: Vec<Vec<i32>> = suffixes
+            .iter()
+            .map(|s| {
+                if s.len() as u32 > DEFAULT_MAX_SUFFIX_TOKENS {
+                    truncate_tokens_head_tail(s, DEFAULT_MAX_SUFFIX_TOKENS as usize)
+                } else {
+                    s.clone()
+                }
+            })
+            .collect();
+        self.decode_suffixes_parallel_inner(prefix_len, &capped)
+    }
+
+    /// True when an engine error looks like llama.cpp KV slot exhaustion.
+    pub fn error_is_kv_slot(err: &Error) -> bool {
+        Self::is_kv_slot_error(&err.to_string())
+    }
+
+    fn decode_suffixes_parallel_inner(
+        &mut self,
+        prefix_len: usize,
+        suffixes: &[Vec<i32>],
+    ) -> Result<Vec<Vec<f32>>> {
+        // Drop stale copies on 1..n_seq_max-1 before re-branching from seq 0.
+        for seq in 1..self.n_seq_max {
+            let _ = self.ctx.clear_kv_cache_seq(Some(seq), None, None);
+        }
+        // Caller must prefill/restore prefix on seq 0; do not clear seq 0 here.
         for (i, suf) in suffixes.iter().enumerate() {
             if suf.is_empty() {
                 return Err(Error::Engine(format!("empty suffix at {i}")));
@@ -500,6 +554,36 @@ impl EngineOwned {
                 "Refusing to decode an empty token list".into(),
             ));
         }
+        // Prefill / full_logits (start == 0): deterministically head+tail truncate
+        // above n_ctx, matching decode_suffixes_parallel's KV safety fence.
+        let owned = if start == 0 {
+            let n_ctx = self.ctx.n_ctx() as usize;
+            if n_ctx > 0 && tokens.len() > n_ctx {
+                Some(truncate_tokens_head_tail(tokens, n_ctx))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let tokens = owned.as_deref().unwrap_or(tokens);
+        match self.decode_logits_seq_inner(tokens, start, seq) {
+            Ok(v) => Ok(v),
+            Err(e) if Self::is_kv_slot_error(&e.to_string()) => {
+                // Single clear_all_seqs retry, matching parallel-suffix recovery.
+                self.clear_all_seqs()?;
+                self.decode_logits_seq_inner(tokens, start, seq)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn decode_logits_seq_inner(
+        &mut self,
+        tokens: &[i32],
+        start: i32,
+        seq: i32,
+    ) -> Result<Vec<f32>> {
         let n_vocab = self.model.n_vocab() as usize;
         let mut batch = LlamaBatch::new(DECODE_CHUNK, self.n_seq_max.max(1) as i32);
         let total = tokens.len();
@@ -631,10 +715,11 @@ mod tests {
     fn n_ctx_budget_covers_parallel_suffixes_vs_legacy() {
         let max_prompt = 2048u32;
         let n_seq = 8u32;
-        let max_suffix = 64u32;
+        let max_suffix = DEFAULT_MAX_SUFFIX_TOKENS;
         let need = required_n_ctx(max_prompt, n_seq, max_suffix);
         let legacy = max_prompt.saturating_add(64);
         assert_eq!(need, max_prompt + n_seq * max_suffix + 64);
+        assert!(max_suffix > 64, "suffix headroom must exceed legacy 64");
         assert!(
             need > legacy,
             "legacy n_ctx={legacy} under-sizes parallel KV need={need} (NoKvCacheSlot risk)"
