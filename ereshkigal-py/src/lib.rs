@@ -97,7 +97,12 @@ impl Engine {
 
 fn tokenizer_for_gguf(gguf: &str) -> (String, String) {
     let name = gguf.to_ascii_lowercase();
-    if name.contains("0.6b") || name.contains("0_6b") {
+    if name.contains("gemma") {
+        (
+            "google/gemma-4-12B-it".into(),
+            "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7".into(),
+        )
+    } else if name.contains("0.6b") || name.contains("0_6b") {
         (
             "Qwen/Qwen3-0.6B".into(),
             "c1899de289a04d12100db370d81485cdf75e47ca".into(),

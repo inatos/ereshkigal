@@ -442,7 +442,15 @@ fn tokenizer_for_gguf(gguf: &Path) -> (String, String) {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if name.contains("0.6b") || name.contains("0_6b") {
+    // Match HF reference tokenizer to the GGUF family. Wrong pin →
+    // "The GGUF vocabulary disagrees with the reference tokenizer" at EngineOwned::load.
+    if name.contains("gemma") {
+        (
+            "google/gemma-4-12B-it".into(),
+            // Local HF hub snapshot on Myridos (models--google--gemma-4-12B-it).
+            "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7".into(),
+        )
+    } else if name.contains("0.6b") || name.contains("0_6b") {
         (
             "Qwen/Qwen3-0.6B".into(),
             "c1899de289a04d12100db370d81485cdf75e47ca".into(),
@@ -885,6 +893,28 @@ fn run_lsp() -> Result<()> {
     }
     io_threads.join().map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tokenizer_for_gguf_tests {
+    use super::tokenizer_for_gguf;
+    use std::path::Path;
+
+    #[test]
+    fn gemma_gguf_pins_gemma4_hf_tokenizer() {
+        let (src, rev) = tokenizer_for_gguf(Path::new(
+            "elucifia-gemma4-12b.q4_k_m.gguf",
+        ));
+        assert_eq!(src, "google/gemma-4-12B-it");
+        assert_eq!(rev, "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7");
+    }
+
+    #[test]
+    fn qwen_0_6b_still_pins_qwen3() {
+        let (src, rev) = tokenizer_for_gguf(Path::new("Qwen3-0.6B-Q8_0.gguf"));
+        assert_eq!(src, "Qwen/Qwen3-0.6B");
+        assert_eq!(rev, "c1899de289a04d12100db370d81485cdf75e47ca");
+    }
 }
 
 #[cfg(test)]
